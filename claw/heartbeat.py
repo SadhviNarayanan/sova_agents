@@ -29,14 +29,17 @@ from query import get_patient_profile
 _thread: threading.Thread | None = None
 _stop_flag: bool = False
 
-# Polling frequency weights (seconds)
-_SEVERITY_FREQ = {0: 60, 1: 30, 2: 15}
-_STAGE_LAG     = {0: 15, 1: 15, 2: 30, 3: 60, 4: 120, 5: 300}
+# Polling frequency weights (minutes). Higher severity = shorter interval.
+_SEVERITY_FREQ = {0: 90, 1: 60, 2: 30}
+_STAGE_LAG     = {0: 10, 1: 10, 2: 20, 3: 30, 4: 60, 5: 120}
+
+_MIN_INTERVAL_MINUTES = 30
 
 
 def calculate_polling_freq(severity: int, stage: int) -> float:
-    """severity (0–2) and stage (0–5) → poll interval in seconds."""
-    return (_SEVERITY_FREQ[severity] * 0.45) + (_STAGE_LAG[stage] * 0.55)
+    """severity (0–2) and stage (0–5) → poll interval in minutes (minimum 30)."""
+    raw = (_SEVERITY_FREQ[severity] * 0.45) + (_STAGE_LAG[stage] * 0.55)
+    return max(raw, _MIN_INTERVAL_MINUTES)
 
 
 def _log_anomaly(data: dict, level: int) -> None:
@@ -88,19 +91,15 @@ def run(user_id: str, max_ticks: int | None = None) -> None:
         stage    = profile["stage"]
         interval = calculate_polling_freq(severity, stage)
 
-        # 2. Sync DB timestamps to current interval; capture anchor on first tick
-        fixed = fix_timestamps(user_id, interval)
-        if fixed:
-            print(f"   [timestamps] corrected {fixed} row(s) at freq={interval:.0f}s")
-
+        
         if anchor is None:
-            anchor = get_anchor(user_id)
+            anchor = get_anchor(user_id) #base timestamp
             if anchor is None:
                 print(f"No Whoop data found for {user_id} — stopping heartbeat")
                 break
 
         # 3. Derive the exact timestamp for this tick and fetch that row
-        expected_ts = anchor + timedelta(seconds=tick * interval)
+        expected_ts = anchor + timedelta(minutes=tick * interval)
         data = fetch_by_timestamp(user_id, expected_ts)
         if not data:
             print(f"No Whoop row at tick={tick} ts={expected_ts.isoformat()} — stopping heartbeat")
@@ -111,11 +110,11 @@ def run(user_id: str, max_ticks: int | None = None) -> None:
         data["anomaly_level"] = anomaly
 
         process(data, anomaly)
-        print(f"   next poll in {interval:.0f}s  (severity={severity}, stage={stage}, anomaly={anomaly})\n")
+        print(f"   next poll in {interval:.0f}min  (severity={severity}, stage={stage}, anomaly={anomaly})\n")
 
         tick += 1
         if (max_ticks is None or tick < max_ticks) and not _stop_flag:
-            time.sleep(interval)
+            time.sleep(interval * 60)
 
     print("Heartbeat monitor stopped")
 
