@@ -9,7 +9,7 @@ import sys
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from agents import AGENT_PROMPTS
+from carerelay_backend.agents import AGENT_PROMPTS
 import anthropic  # For Claude API integration
 
 # Add parent directory to path to import agentic_convo and langgraph_council
