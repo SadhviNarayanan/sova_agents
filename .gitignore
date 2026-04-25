@@ -1,9 +1,17 @@
+# Secrets — never commit these
+claw/config.json
+claw/telegram_config.json
+
 .env
 .env.*
 !.env.example
-.venv/
+
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
 .DS_Store
-# Ignore local Telegram bot config with secrets
-claw/telegram_config.json

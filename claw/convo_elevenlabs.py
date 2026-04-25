@@ -5,6 +5,7 @@ Voice utilities for CareRelay's in-house voice agent.
   speech_to_text  — transcribes a complete audio file → text (ElevenLabs STT)
   realtime_agent  — live mic → ElevenLabs real-time STT WebSocket → TTS reply loop
 """
+from __future__ import annotations
 
 import asyncio
 import io
@@ -141,6 +142,10 @@ async def realtime_agent(get_reply, chunk_ms: int = 250) -> None:
 
 
 # ── Quick demo ────────────────────────────────────────────────────────────────
+
+
+def patient_convo():
+    pass
 
 if __name__ == "__main__":
     import sys
