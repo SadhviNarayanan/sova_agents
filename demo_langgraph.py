@@ -75,8 +75,8 @@ def demo_langgraph_council():
             print(f"🔥 Urgency: {decision['urgency_level'].upper()}")
             print(f"👥 Support: {decision['supporting_agents']}/7 agents")
 
-            if decision.get('key_insights'):
-                print(f"💡 Key Insights: {', '.join(decision['key_insights'])}")
+            if decision.get('doctor_report'):
+                print(f"\n📝 Doctor Report:\n   {decision['doctor_report']}")
 
             if decision.get('action_items'):
                 print("✅ Action Items:")
