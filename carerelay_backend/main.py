@@ -8,7 +8,7 @@ import os
 import sys
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, date
 from carerelay_backend.agents import AGENT_PROMPTS
 import anthropic  # For Claude API integration
 
@@ -58,21 +58,43 @@ class CheckinResponse(BaseModel):
     patient_state: PatientState
     needs_council: bool
 
+class Vitals(BaseModel):
+    HeartRate: Optional[int] = None
+    BloodPressure: Optional[str] = None
+    Temperature: Optional[float] = None
+    TimeStamp: Optional[datetime] = None
+
 class AnalyzeRequest(BaseModel):
-    patient_id: str
-    age: int
-    gender: str
-    diagnosis: str
-    heart_rate: float
-    spo2: float
-    blood_pressure: Optional[str] = None
-    temperature: Optional[float] = None
-    symptoms: List[str] = []
-    medications: List[Dict] = []
-    lab_results: Optional[Dict] = None
-    lifestyle: Optional[Dict] = None
-    trigger: str = "post_mi_monitoring"
+    # Patient profile
+    patientId: str
+    Age: int
+    Gender: str
+    DateOfBirth: Optional[date] = None
+    Address: Optional[str] = None
+    Surgery: str
+    DischargeDate: date
+    RiskLevel: str                        # Low / Medium / High
+    BloodPressure: Optional[str] = None  # baseline
+    HeartRate: Optional[int] = None      # baseline
+    Allergies: Optional[str] = None
+    CurrentMedications: Optional[str] = None
+    DoctorPhoneNumber: Optional[str] = None
+    EmergencyContactName: Optional[str] = None
+    EmergencyContactPhone: Optional[str] = None
+    # Derived fields
+    severity: Optional[int] = None       # 0=low, 1=medium, 2=high
+    stage: Optional[int] = None          # 0-5, days-since-discharge band
+    # Live vitals
+    vitals: Optional[Vitals] = None
+    # ML heartbeat output
+    anomaly_level: Optional[int] = None  # 0-4, from ML model
+    interval: Optional[int] = None       # current polling freq in seconds
+    # Routing
     webhook_url: Optional[str] = None
+
+    @property
+    def patient_id(self) -> str:
+        return self.patientId
 
 # In-memory storage (in production, use database)
 patients: Dict[str, PatientState] = {}
@@ -85,13 +107,56 @@ executor = ThreadPoolExecutor()
 async def root():
     return {"message": "CareRelay API is running"}
 
+SEVERITY_LABELS = {0: "low", 1: "medium", 2: "high"}
+STAGE_LABELS = {
+    0: "day of discharge",
+    1: "days 1-3 post-discharge",
+    2: "days 4-7 post-discharge",
+    3: "week 2 post-discharge",
+    4: "weeks 3-4 post-discharge",
+    5: "month 2+ post-discharge",
+}
+ANOMALY_LABELS = {0: "normal", 1: "mild", 2: "moderate", 3: "significant", 4: "critical"}
+
+def build_patient_dict(request: AnalyzeRequest) -> dict:
+    days_since_discharge = (date.today() - request.DischargeDate).days if request.DischargeDate else None
+    return {
+        "patient_id": request.patientId,
+        "age": request.Age,
+        "gender": request.Gender,
+        "surgery": request.Surgery,
+        "discharge_date": request.DischargeDate.isoformat() if request.DischargeDate else None,
+        "days_since_discharge": days_since_discharge,
+        "recovery_stage": STAGE_LABELS.get(request.stage, f"stage {request.stage}") if request.stage is not None else None,
+        "risk_level": request.RiskLevel,
+        "severity": SEVERITY_LABELS.get(request.severity, "unknown") if request.severity is not None else None,
+        "baseline_heart_rate": request.HeartRate,
+        "baseline_blood_pressure": request.BloodPressure,
+        "allergies": request.Allergies,
+        "current_medications": request.CurrentMedications,
+        "vitals": {
+            "heart_rate": request.vitals.HeartRate if request.vitals else None,
+            "blood_pressure": request.vitals.BloodPressure if request.vitals else None,
+            "temperature": request.vitals.Temperature if request.vitals else None,
+            "timestamp": request.vitals.TimeStamp.isoformat() if request.vitals and request.vitals.TimeStamp else None,
+        } if request.vitals else None,
+        "anomaly_level": request.anomaly_level,
+        "anomaly_severity": ANOMALY_LABELS.get(request.anomaly_level, "unknown") if request.anomaly_level is not None else None,
+        "polling_interval_seconds": request.interval,
+        "emergency_contact": {
+            "name": request.EmergencyContactName,
+            "phone": request.EmergencyContactPhone,
+        },
+    }
+
+
 @app.post("/analyze")
 async def analyze(request: AnalyzeRequest):
     """
     Single-call endpoint for external systems (e.g. OpenClaw).
     Send full patient data, get back a council decision + doctor report.
     """
-    patient_dict = request.model_dump()
+    patient_dict = build_patient_dict(request)
     council = LangGraphMedicalCouncil(max_utterances=8)
     result = council.orchestrate_debate(patient_dict, webhook_url=request.webhook_url)
     final_decision = result["final_decision"]
@@ -299,7 +364,7 @@ async def start_debate(patient_id: str, request: AnalyzeRequest):
 
     def run():
         council = LangGraphMedicalCouncil(max_utterances=8, event_callback=on_event)
-        council.orchestrate_debate(request.model_dump(), webhook_url=request.webhook_url)
+        council.orchestrate_debate(build_patient_dict(request), webhook_url=request.webhook_url)
 
     loop.run_in_executor(executor, run)
 

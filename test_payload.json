@@ -1,11 +1,24 @@
 {
-  "patient_id": "CR-002",
-  "age": 72,
-  "gender": "male",
-  "diagnosis": "Congestive heart failure",
-  "heart_rate": 112,
-  "spo2": 91,
-  "symptoms": ["leg swelling"],
-  "medications": [{"name": "Spironolactone", "dose": "25mg", "compliance": "missed doses"}],
-  "trigger": "heart_failure_decompensation"
+  "patientId": "CR-002",
+  "Age": 72,
+  "Gender": "male",
+  "Surgery": "Coronary artery bypass graft (CABG)",
+  "DischargeDate": "2026-04-20",
+  "RiskLevel": "High",
+  "BloodPressure": "145/90",
+  "HeartRate": 88,
+  "Allergies": "Penicillin",
+  "CurrentMedications": "Furosemide 40mg, Carvedilol 12.5mg, Spironolactone 25mg (missed doses)",
+  "EmergencyContactName": "James Turner",
+  "EmergencyContactPhone": "+14155550102",
+  "severity": 2,
+  "stage": 1,
+  "vitals": {
+    "HeartRate": 112,
+    "BloodPressure": "152/94",
+    "Temperature": 98.8,
+    "TimeStamp": "2026-04-25T09:15:00"
+  },
+  "anomaly_level": 3,
+  "interval": 30
 }

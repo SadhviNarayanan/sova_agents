@@ -1,0 +1,24 @@
+{
+  "patientId": "CR-004",
+  "Age": 65,
+  "Gender": "male",
+  "Surgery": "Appendectomy",
+  "DischargeDate": "2026-04-15",
+  "RiskLevel": "Low",
+  "BloodPressure": "122/78",
+  "HeartRate": 68,
+  "Allergies": "None",
+  "CurrentMedications": "Metoprolol 25mg",
+  "EmergencyContactName": "Carol Greene",
+  "EmergencyContactPhone": "+14155550177",
+  "severity": 0,
+  "stage": 3,
+  "vitals": {
+    "HeartRate": 72,
+    "BloodPressure": "124/80",
+    "Temperature": 98.4,
+    "TimeStamp": "2026-04-25T07:30:00"
+  },
+  "anomaly_level": 0,
+  "interval": 300
+}
