@@ -383,11 +383,16 @@ async def stream_debate(patient_id: str):
     Never needs to send any data.
     """
     async def generate():
-        queue = debate_queues.get(patient_id)
-        if not queue:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'No active debate for this patient'})}\n\n"
+        # Wait up to 5 minutes for a debate to start
+        for _ in range(300):
+            if patient_id in debate_queues:
+                break
+            await asyncio.sleep(1)
+        else:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Timed out waiting for debate to start'})}\n\n"
             return
 
+        queue = debate_queues[patient_id]
         while True:
             event = await queue.get()
             yield f"data: {json.dumps(event, default=str)}\n\n"
