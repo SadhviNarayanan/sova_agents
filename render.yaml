@@ -2,6 +2,7 @@ services:
   - type: web
     name: carerelay
     runtime: python
+    pythonVersion: "3.11"
     buildCommand: pip install -r carerelay_backend/requirements.txt
     startCommand: uvicorn carerelay_backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
