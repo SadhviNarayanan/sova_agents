@@ -1,18 +1,24 @@
 """
-heartbeat.py — continuous patient-data polling loop.
+heartbeat.py — continuous patient-data polling loop, runs as a daemon thread.
 
 Mirrors openclaw's orchestration pattern: fetch → process → sleep,
 where the sleep interval is determined dynamically by calculate_polling_freq()
 based on the patient's current severity and post-discharge stage.
 
-Entry point: run()
-Data source:  synthetic_data.get_data()  (swap for real source when ready)
+Entry points:
+  start() — launch as a non-blocking background daemon thread (use this)
+  run()   — blocking loop, called internally by start()
+Data source: synthetic_data.get_data()  (swap for real source when ready)
 """
 
+import threading
 import time
 from datetime import datetime, timezone
 
 from synthetic_data import get_data
+
+_thread: threading.Thread | None = None
+_stop_flag: bool = False
 
 # Polling frequency weights (seconds)
 _SEVERITY_FREQ = {0: 60, 1: 30, 2: 15}
@@ -27,7 +33,7 @@ def calculate_polling_freq(severity: int, stage: int) -> float:
 def process(data: dict) -> None:
     """Input: patient snapshot dict → side-effects (alerts, logging, escalation hooks)."""
     ts  = data.get("timestamp", datetime.now(timezone.utc).isoformat())
-    pid = data.get("patient_id", "unknown")
+    pid = data.get("patient_id")
     hr  = data.get("heart_rate")
     spo2 = data.get("spo2")
 
@@ -42,31 +48,48 @@ def process(data: dict) -> None:
 
 
 def run(max_ticks: int | None = None) -> None:
-    """
-    Main polling loop — mirrors openclaw's orchestrate_debate round structure.
-
-    Runs indefinitely (or for max_ticks iterations if set).
-    Each tick: fetch data → process → sleep for the dynamically computed interval.
-    """
-    print("💓 Heartbeat monitor started")
+    """Blocking poll loop — call start() instead to run this in the background."""
+    global _stop_flag
+    _stop_flag = False
+    print("Heartbeat monitor started")
     tick = 0
 
-    while max_ticks is None or tick < max_ticks:
+    while (max_ticks is None or tick < max_ticks) and not _stop_flag:
         data = get_data()
-
-        severity = data.get("severity", 1)
-        stage    = data.get("stage", 2)
+        severity = data["severity"]
+        stage    = data["stage"]
         interval = calculate_polling_freq(severity, stage)
 
         process(data)
         print(f"   next poll in {interval:.0f}s  (severity={severity}, stage={stage})\n")
 
         tick += 1
-        if max_ticks is None or tick < max_ticks:
+        if (max_ticks is None or tick < max_ticks) and not _stop_flag:
             time.sleep(interval)
 
-    print("💓 Heartbeat monitor stopped")
+    print("Heartbeat monitor stopped")
+
+
+def start() -> None:
+    """Launch the heartbeat loop as a background daemon thread (non-blocking)."""
+    global _thread
+    if _thread and _thread.is_alive():
+        return
+    _thread = threading.Thread(target=run, daemon=True, name="heartbeat")
+    _thread.start()
+
+
+def stop() -> None:
+    """Signal the heartbeat thread to exit after its current sleep interval."""
+    global _stop_flag
+    _stop_flag = True
 
 
 if __name__ == "__main__":
-    run()
+    start()
+    # Keep main thread alive so the daemon has something to run against
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Heartbeat shutting down")
