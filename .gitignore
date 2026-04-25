@@ -1,2 +1,9 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
 # Ignore local Telegram bot config with secrets
 claw/telegram_config.json

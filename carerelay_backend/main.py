@@ -1,11 +1,15 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import json
 import os
 import sys
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from agents import AGENT_PROMPTS
+from carerelay_backend.agents import AGENT_PROMPTS
 import anthropic  # For Claude API integration
 
 # Add parent directory to path to import agentic_convo and langgraph_council
@@ -14,6 +18,19 @@ from agentic_convo import MedicalCouncilOrchestrator
 from langgraph_council import LangGraphMedicalCouncil
 
 app = FastAPI(title="CareRelay API", description="AI-powered post-hospital care monitoring system")
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve static files (frontend)
+static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+os.makedirs(static_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Pydantic models
 class PatientVitals(BaseModel):
@@ -31,6 +48,7 @@ class PatientState(BaseModel):
 
 class CouncilDecision(BaseModel):
     decision: str
+    doctor_report: str
     confidence: float
     actions: List[str]
     escalation_level: int  # 1-5, 5 being highest
@@ -40,12 +58,57 @@ class CheckinResponse(BaseModel):
     patient_state: PatientState
     needs_council: bool
 
+class AnalyzeRequest(BaseModel):
+    patient_id: str
+    age: int
+    gender: str
+    diagnosis: str
+    heart_rate: float
+    spo2: float
+    blood_pressure: Optional[str] = None
+    temperature: Optional[float] = None
+    symptoms: List[str] = []
+    medications: List[Dict] = []
+    lab_results: Optional[Dict] = None
+    lifestyle: Optional[Dict] = None
+    trigger: str = "post_mi_monitoring"
+    webhook_url: Optional[str] = None
+
 # In-memory storage (in production, use database)
 patients: Dict[str, PatientState] = {}
+
+# Per-patient event queues for SSE streaming
+debate_queues: Dict[str, asyncio.Queue] = {}
+executor = ThreadPoolExecutor()
 
 @app.get("/")
 async def root():
     return {"message": "CareRelay API is running"}
+
+@app.post("/analyze")
+async def analyze(request: AnalyzeRequest):
+    """
+    Single-call endpoint for external systems (e.g. OpenClaw).
+    Send full patient data, get back a council decision + doctor report.
+    """
+    patient_dict = request.model_dump()
+    council = LangGraphMedicalCouncil(max_utterances=8)
+    result = council.orchestrate_debate(patient_dict, webhook_url=request.webhook_url)
+    final_decision = result["final_decision"]
+
+    return {
+        "patient_id": request.patient_id,
+        "immediate_action": final_decision.get("immediate_action", "Sleep"),
+        "decision": final_decision["consensus_recommendation"],
+        "doctor_report": final_decision.get("doctor_report", ""),
+        "urgency_level": final_decision["urgency_level"],
+        "confidence": final_decision["confidence_score"],
+        "actions": final_decision["action_items"],
+        "escalation_level": {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(
+            final_decision["urgency_level"], 2
+        ),
+        "debate_rounds": result["convergence_state"]["rounds_completed"],
+    }
 
 @app.post("/ingest_vitals/{patient_id}")
 async def ingest_vitals(patient_id: str, vitals: PatientVitals):
@@ -197,7 +260,7 @@ async def run_agent_council(patient: PatientState, use_langgraph: bool = True) -
 
     if use_langgraph:
         # Use LangGraph orchestrator
-        council = LangGraphMedicalCouncil(max_rounds=5)
+        council = LangGraphMedicalCouncil(max_utterances=8)
         result = council.orchestrate_debate(patient_dict)
     else:
         # Use original orchestrator
@@ -209,6 +272,7 @@ async def run_agent_council(patient: PatientState, use_langgraph: bool = True) -
 
     return CouncilDecision(
         decision=final_decision["consensus_recommendation"],
+        doctor_report=final_decision.get("doctor_report", ""),
         confidence=final_decision["confidence_score"],
         actions=final_decision["action_items"],
         escalation_level={
@@ -219,6 +283,127 @@ async def run_agent_council(patient: PatientState, use_langgraph: bool = True) -
         }.get(final_decision["urgency_level"], 2)
     )
 
+@app.post("/start-debate/{patient_id}")
+async def start_debate(patient_id: str, request: AnalyzeRequest):
+    """
+    OpenClaw calls this. Starts the debate in the background and returns immediately.
+    - Streams doctor events to frontend via GET /stream/{patient_id}
+    - Pushes final decision + immediate_action to webhook_url when done
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    debate_queues[patient_id] = queue
+    loop = asyncio.get_event_loop()
+
+    def on_event(event):
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def run():
+        council = LangGraphMedicalCouncil(max_utterances=8, event_callback=on_event)
+        council.orchestrate_debate(request.model_dump(), webhook_url=request.webhook_url)
+
+    loop.run_in_executor(executor, run)
+
+    return {
+        "status": "debate started",
+        "patient_id": patient_id,
+        "stream_url": f"/stream/{patient_id}",
+        "note": "Final decision will be POSTed to webhook_url when complete"
+    }
+
+
+@app.get("/stream/{patient_id}")
+async def stream_debate(patient_id: str):
+    """
+    Frontend calls this. Pure SSE — just waits and receives events as doctors speak.
+    Never needs to send any data.
+    """
+    async def generate():
+        queue = debate_queues.get(patient_id)
+        if not queue:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No active debate for this patient'})}\n\n"
+            return
+
+        while True:
+            event = await queue.get()
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+            if event.get("type") in ("done", "error"):
+                break
+
+        debate_queues.pop(patient_id, None)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no"
+    })
+
+
+@app.get("/ui", response_class=HTMLResponse)
+async def ui():
+    """Serve the live debate frontend"""
+    with open(os.path.join(static_dir, "index.html")) as f:
+        return f.read()
+
+@app.post("/stream-analyze")
+async def stream_analyze(request: AnalyzeRequest):
+    """
+    Streaming endpoint — yields each agent's response as SSE the moment it's generated.
+    Used by the live debate UI.
+    """
+    async def generate():
+        patient_dict = request.model_dump()
+        council = LangGraphMedicalCouncil(max_utterances=8)
+
+        initial_state = {
+            "patient_data": patient_dict,
+            "debate_history": [],
+            "relevant_agents": [],
+            "next_agent": "",
+            "convergence_score": 0.0,
+            "final_decision": None,
+            "max_utterances": 8,
+            "total_utterances": 0,
+        }
+
+        seen_entries = 0
+        for chunk in council.graph.stream(initial_state):
+            for node_name, state in chunk.items():
+                if node_name == "agent_speak":
+                    history = state.get("debate_history", [])
+                    if len(history) > seen_entries:
+                        entry = history[-1]
+                        seen_entries = len(history)
+                        payload = {
+                            "type": "agent",
+                            "round": entry["round"],
+                            "agent": entry["agent"],
+                            "specialty": entry["specialty"],
+                            "statement": entry["response"]["statement"],
+                            "convergence": state.get("convergence_score", 0.0)
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        await asyncio.sleep(0)
+
+                elif node_name == "finalize_decision":
+                    decision = state.get("final_decision")
+                    if decision:
+                        payload = {
+                            "type": "decision",
+                            "immediate_action": decision.get("immediate_action", "Sleep"),
+                            "decision": decision["consensus_recommendation"],
+                            "doctor_report": decision.get("doctor_report", ""),
+                            "urgency_level": decision["urgency_level"],
+                            "confidence": decision["confidence_score"],
+                            "actions": decision.get("action_items", [])
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n"
+
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no"
+    })
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

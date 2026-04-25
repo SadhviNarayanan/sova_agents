@@ -1,0 +1,11 @@
+{
+  "patient_id": "CR-002",
+  "age": 72,
+  "gender": "male",
+  "diagnosis": "Congestive heart failure",
+  "heart_rate": 112,
+  "spo2": 91,
+  "symptoms": ["leg swelling"],
+  "medications": [{"name": "Spironolactone", "dose": "25mg", "compliance": "missed doses"}],
+  "trigger": "heart_failure_decompensation"
+}
