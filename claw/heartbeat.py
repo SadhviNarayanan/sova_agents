@@ -1,22 +1,24 @@
 """
-heartbeat.py — continuous patient-data polling loop, runs as a daemon thread.
+heartbeat.py — continuous WHOOP-data polling loop, runs as a daemon thread.
 
 Mirrors openclaw's orchestration pattern: fetch → process → sleep,
-where the sleep interval is determined dynamically by calculate_polling_freq()
-based on the patient's current severity and post-discharge stage.
+where sleep interval is driven by severity and stage passed in the data payload,
+and escalation is driven by anomaly_level (1–4) also received from the data source.
 
 Entry points:
   start() — launch as a non-blocking background daemon thread (use this)
   run()   — blocking loop, called internally by start()
-Data source: synthetic_data.get_data()  (swap for real source when ready)
-
-Runs as a background thread 
+Data source: synthetic_data.get_data()  (swap for real DB/CSV read when ready)
 """
+
+from __future__ import annotations
 
 import threading
 import time
 from datetime import datetime, timezone
 
+from call_twilio import call_911, call_caregiver, text_caregiver
+from db import log_anomaly_to_db
 from synthetic_data import get_data
 
 _thread: threading.Thread | None = None
@@ -28,25 +30,41 @@ _STAGE_LAG     = {0: 15, 1: 15, 2: 30, 3: 60, 4: 120, 5: 300}
 
 
 def calculate_polling_freq(severity: int, stage: int) -> float:
-    """Input: severity (0–2) and post-discharge stage (0–5) → poll interval in seconds."""
+    """severity (0–2) and stage (0–5) → poll interval in seconds."""
     return (_SEVERITY_FREQ[severity] * 0.45) + (_STAGE_LAG[stage] * 0.55)
 
 
-def process(data: dict) -> None:
-    """Input: patient snapshot dict → side-effects (alerts, logging, escalation hooks)."""
-    ts  = data.get("timestamp", datetime.now(timezone.utc).isoformat())
-    pid = data.get("patient_id")
-    hr  = data.get("heart_rate")
-    spo2 = data.get("spo2")
+def _log_anomaly(data: dict, level: int) -> None:
+    """Input: snapshot + anomaly level → writes directly to the GCP database."""
+    log_anomaly_to_db(data, level)
 
-    print(f"[{ts}] {pid}  HR={hr}  SpO2={spo2}%")
 
-    # ── escalation hooks (placeholders) ─────────────────────────────────────
-    if hr and hr > 100:
-        print(f"  ⚠  Elevated HR ({hr}) — trigger council review")
+def _fire(fn, *args) -> None:
+    """Spawn fn(*args) in a detached thread — heartbeat loop does not block on it."""
+    t = threading.Thread(target=fn, args=args, daemon=False)
+    t.start()
 
-    if spo2 and spo2 < 94:
-        print(f"  ⚠  Low SpO2 ({spo2}%) — trigger council review")
+
+def process(data: dict, anomaly: int) -> None:
+    """Input: WHOOP snapshot + anomaly level received from data source → log and route."""
+    uid      = data.get("user_id", "unknown")
+    ts       = data.get("date", datetime.now(timezone.utc).isoformat())
+    recovery = data.get("recovery_score")
+    hrv      = data.get("hrv")
+    rhr      = data.get("resting_heart_rate")
+    strain   = data.get("day_strain")
+    sleep_p  = data.get("sleep_performance")
+
+    print(f"[{ts}] {uid}  recovery={recovery}  hrv={hrv}  rhr={rhr}  strain={strain}  sleep={sleep_p}%")
+
+    if anomaly == 4:
+        _fire(call_911)
+    elif anomaly == 3:
+        _fire(call_caregiver)
+    elif anomaly == 2:
+        _fire(text_caregiver)
+    elif anomaly == 1:
+        _fire(_log_anomaly, data, anomaly)
 
 
 def run(max_ticks: int | None = None) -> None:
@@ -57,13 +75,14 @@ def run(max_ticks: int | None = None) -> None:
     tick = 0
 
     while (max_ticks is None or tick < max_ticks) and not _stop_flag:
-        data = get_data()
-        severity = data["severity"]
-        stage    = data["stage"]
+        data     = get_data()
+        severity = data.get("severity", 1)
+        stage    = data.get("stage", 2)
+        anomaly  = data.get("anomaly_level", 0)
         interval = calculate_polling_freq(severity, stage)
 
-        process(data)
-        print(f"   next poll in {interval:.0f}s  (severity={severity}, stage={stage})\n")
+        process(data, anomaly)
+        print(f"   next poll in {interval:.0f}s  (severity={severity}, stage={stage}, anomaly={anomaly})\n")
 
         tick += 1
         if (max_ticks is None or tick < max_ticks) and not _stop_flag:
@@ -89,7 +108,6 @@ def stop() -> None:
 
 if __name__ == "__main__":
     start()
-    # Keep main thread alive so the daemon has something to run against
     try:
         while True:
             time.sleep(1)
