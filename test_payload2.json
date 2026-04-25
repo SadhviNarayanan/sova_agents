@@ -1,0 +1,11 @@
+{
+  "patient_id": "CR-003",
+  "age": 58,
+  "gender": "female",
+  "diagnosis": "Post-operative knee replacement",
+  "heart_rate": 104,
+  "spo2": 93,
+  "symptoms": ["chest tightness", "shortness of breath", "calf pain"],
+  "medications": [{"name": "Warfarin", "dose": "5mg", "compliance": "irregular"}],
+  "trigger": "post_op_monitoring"
+}

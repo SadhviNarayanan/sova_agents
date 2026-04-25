@@ -51,21 +51,71 @@ Manual Python orchestration loop. `MedicalCouncilOrchestrator` manages 7 `Medica
 Refactor of the above using `StateGraph` with typed state, conditional edges, and better debugging. Uses the same 7 agents and convergence logic. `demo_langgraph.py` / `demo_comparison.py` exercise this path.
 
 ### FastAPI Backend (`carerelay_backend/`)
-- **`main.py`** — 5 REST endpoints: `ingest_vitals`, `voice_checkin`, `simulate_risk`, `council_debate`, `escalate`. Uses Anthropic Claude for council debates.
+- **`main.py`** — REST endpoints (see API section below). All imports use `carerelay_backend.*` package paths (required for Render deployment from repo root).
 - **`agents.py`** — System prompts for the 6 backend-specific agent roles (Cardiologist, Pharmacist, Advocate, GP, Nurse, Facilitator).
 - **`voice_checkin.py`** — ElevenLabs TTS scripts (not yet wired into the API).
+
+### API Endpoints
+
+| Endpoint | Caller | Behavior |
+|---|---|---|
+| `POST /start-debate/{patient_id}` | OpenClaw | Returns immediately; runs debate in background; POSTs final decision to `webhook_url` when done |
+| `GET /stream/{patient_id}` | Frontend | SSE stream — doctor messages arrive one by one, then the final decision event |
+| `POST /analyze` | OpenClaw (blocking) | Blocks until debate complete, returns full decision in one response |
+
+### Integration Pattern
+
+**OpenClaw** (async with webhook):
+```bash
+curl -X POST 'https://sova-agents.onrender.com/start-debate/CR-002' \
+  -H 'Content-Type: application/json' -d @payload.json
+# Returns: {"status": "debate started", "stream_url": "/stream/CR-002"}
+# Later POSTs to webhook_url: {"event": "decision", "immediate_action": "...", "decision": "..."}
+```
+
+**Frontend** (SSE listener):
+```js
+const stream = await fetch('https://sova-agents.onrender.com/stream/CR-002');
+// Events: {type:"agent", agent:"...", statement:"..."} ... {type:"decision"} {type:"done"}
+```
+
+**OpenClaw** (blocking, no webhook needed):
+```bash
+curl -X POST 'https://sova-agents.onrender.com/analyze' \
+  -H 'Content-Type: application/json' -d @payload.json
+# Blocks ~30-60s, returns full decision JSON
+```
+
+### Webhook Payload (POSTed to `webhook_url` on debate completion)
+```json
+{
+  "type": "decision",
+  "event": "decision",
+  "patient_id": "CR-002",
+  "immediate_action": "Call caregiver",
+  "decision": "...",
+  "doctor_report": "...",
+  "urgency_level": "high",
+  "confidence_score": 0.87,
+  "action_items": [...]
+}
+```
+
+### Deployment
+- Hosted on Render: `https://sova-agents.onrender.com`
+- `runtime.txt` pins Python version; `render.yaml` sets build/start commands
+- Free tier spins down after 15min idle — first request after idle takes ~30s cold start
+- `requirements.txt` uses `>=` version pins to ensure Python 3.14-compatible wheels
 
 ### Convergence Detection
 Dual strategy: fast keyword heuristics (scanning agent responses for agreement/disagreement terms) + slower LLM judge call. The orchestrator exits early when convergence score exceeds threshold or max rounds is reached.
 
 ### Data Flow
 ```
-Patient vitals → Council initialization
-→ Dynamic speaking order (specialty relevance)
-→ Iterative debate rounds (agents respond to each other)
-→ Convergence detection
-→ Final consensus + escalation decision
-→ Twilio SMS/call (if escalation triggered)
+OpenClaw POST /start-debate  →  debate runs in background thread
+                             →  frontend GET /stream gets SSE doctor messages
+                             →  on completion: webhook POST to OpenClaw callback
+                                              + SSE "done" event to frontend
 ```
 
 ## Current State / Known Gaps
