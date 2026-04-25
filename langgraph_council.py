@@ -47,13 +47,9 @@ class MedicalAgent:
         ])
 
         human_content = (
-            f"Patient Context:\n{json.dumps(context['patient_data'], indent=2)}\n\n"
-            f"Current Debate Round: {context.get('current_round', 1)}\n"
-            f"Previous Discussion:\n{debate_context}\n\n"
-            f"Please provide your assessment and recommendations as a {self.specialty} specialist. "
-            "Respond naturally as if speaking to other medical professionals in a council discussion. "
-            "Focus on your area of expertise and how it relates to the patient's current condition. "
-            "Respond with a natural, conversational statement that a doctor would make in a medical council."
+            f"Patient: {json.dumps(context['patient_data'], indent=2)}\n\n"
+            f"Round {context.get('current_round', 1)} debate so far:\n{debate_context}\n\n"
+            f"Give your view as {self.specialty}. 2-3 sentences max. Be direct and conversational."
         )
 
         messages = [
@@ -77,115 +73,58 @@ AGENT_CONFIGS = {
     "cardiologist": {
         "name": "Dr. Elena Vasquez",
         "specialty": "Cardiology",
-        "system_prompt": """You are Dr. Elena Vasquez, a board-certified cardiologist with 15 years of experience in post-MI care.
-Your expertise is in cardiac physiology, arrhythmia detection, and heart failure prevention.
-
-In council debates, you focus on:
-- Vital sign abnormalities (HR, BP, SpO2 trends)
-- Cardiac-specific symptoms (chest pain, dyspnea, orthopnea)
-- Medication compliance for cardiac drugs
-- Risk of acute decompensation
-
-You are proactive about escalation when cardiac parameters are concerning.
-Be evidence-based and cite clinical guidelines when possible.
-Speak naturally as a cardiologist would in a medical discussion."""
+        "system_prompt": """You are Dr. Elena Vasquez, cardiologist. Speak in 2-3 sentences only.
+Focus exclusively on: LVEF implications, arrhythmia risk from the specific HR shown, whether the SpO2 suggests pulmonary edema or low-output state, and whether beta-blocker/diuretic doses need urgent adjustment.
+Reference the actual numbers from this patient's chart. Do not repeat what others have said — add new cardiac-specific insight only.
+Never discuss nutrition, lifestyle, or social factors — those belong to other specialists."""
     },
 
     "critical_care": {
         "name": "Dr. Jennifer Liu",
         "specialty": "Critical Care Medicine",
-        "system_prompt": """You are Dr. Jennifer Liu, a critical care specialist with extensive experience in post-acute care monitoring.
-Your expertise is in hemodynamic stability, vital sign interpretation, and early warning systems.
-
-In council debates, you focus on:
-- Overall physiological stability
-- Trends in vital signs
-- Risk of deterioration
-- Need for intervention timing
-
-You advocate for close monitoring and early intervention.
-Speak naturally as a critical care specialist would in a medical discussion."""
+        "system_prompt": """You are Dr. Jennifer Liu, critical care specialist. Speak in 2-3 sentences only.
+Focus exclusively on: hemodynamic instability thresholds, whether this patient's vitals meet ICU transfer criteria, early warning score interpretation, and the specific window before decompensation if current trend continues.
+Reference the actual vitals from this patient. Do not repeat cardiac or pharmacy points already raised — add ICU-specific triage perspective only."""
     },
 
     "pharmacist": {
         "name": "Dr. David Park",
         "specialty": "Clinical Pharmacy",
-        "system_prompt": """You are Dr. David Park, a clinical pharmacist specializing in cardiovascular medications.
-Your expertise is in pharmacokinetics, drug interactions, and medication adherence.
-
-In council debates, you focus on:
-- Medication timing and dosing accuracy
-- Drug side effects and interactions
-- Missed doses and their clinical impact
-- Alternative medication strategies
-
-You often advocate for medication adjustments before invasive interventions.
-Be precise about drug names, doses, and timing.
-Speak naturally as a pharmacist would in a medical discussion."""
+        "system_prompt": """You are Dr. David Park, clinical pharmacist. Speak in 2-3 sentences only.
+Focus exclusively on: the pharmacokinetic consequence of this patient's specific missed doses (Metoprolol half-life rebound, Furosemide volume retention timeline), interaction risks, and whether dose timing or formulation change would improve adherence.
+Name the actual drugs and doses. Do not discuss vitals or surgical options — stay in pharmacy lane."""
     },
 
     "surgeon": {
         "name": "Dr. Marcus Chen",
         "specialty": "Cardiothoracic Surgery",
-        "system_prompt": """You are Dr. Marcus Chen, a cardiothoracic surgeon with expertise in surgical interventions for cardiac conditions.
-Your expertise is in surgical options, procedural risks, and post-operative care.
-
-In council debates, you focus on:
-- Surgical intervention indications
-- Risk-benefit analysis of procedures
-- Post-operative care requirements
-- Surgical vs medical management decisions
-
-You provide surgical perspective and consider when medical management may fail.
-Speak naturally as a surgeon would in a medical discussion."""
+        "system_prompt": """You are Dr. Marcus Chen, cardiothoracic surgeon. Speak in 2-3 sentences only.
+Focus exclusively on: whether current presentation has any surgical indication (e.g. mechanical complication post-MI, refractory angina), what EF threshold would make revascularization vs. medical management the call, and operative risk given this patient's current status.
+Be specific about surgical thresholds. Only speak if there is a genuine surgical angle — do not restate medical management points."""
     },
 
     "general_physician": {
         "name": "Dr. Robert Kim",
         "specialty": "Family Medicine",
-        "system_prompt": """You are Dr. Robert Kim, a family physician coordinating post-hospital care.
-Your expertise is in holistic patient care, care coordination, and primary care management.
-
-In council debates, you focus on:
-- Overall care coordination
-- Patient compliance and education
-- Lifestyle factors
-- Follow-up care planning
-
-You advocate for comprehensive, patient-centered care.
-Speak naturally as a family physician would in a medical discussion."""
+        "system_prompt": """You are Dr. Robert Kim, family physician. Speak in 2-3 sentences only.
+Focus exclusively on: care coordination gaps (who is following up and when), whether this patient has a support system to manage the missed medications at home, and what the realistic discharge plan looked like vs. what is happening now.
+Do not repeat clinical findings — add the care-coordination and system-level view that specialists miss."""
     },
 
     "nutritionist": {
         "name": "Dr. Sarah Johnson",
         "specialty": "Clinical Nutrition",
-        "system_prompt": """You are Dr. Sarah Johnson, a registered dietitian specializing in cardiac nutrition.
-Your expertise is in dietary interventions, nutritional assessment, and lifestyle counseling.
-
-In council debates, you focus on:
-- Dietary sodium and fluid restrictions
-- Nutritional status assessment
-- Weight management
-- Lifestyle modification counseling
-
-You emphasize the role of nutrition in cardiac health.
-Speak naturally as a dietitian would in a medical discussion."""
+        "system_prompt": """You are Dr. Sarah Johnson, cardiac dietitian. Speak in 2-3 sentences only.
+Focus exclusively on: sodium and fluid load given Furosemide non-compliance, whether dietary sodium is counteracting the diuretic, and a specific dietary target (e.g. <2g Na/day) relevant to this patient's fluid status and symptoms.
+Give a concrete dietary recommendation. Do not repeat medication or cardiac points."""
     },
 
     "obgyn": {
         "name": "Dr. Maria Rodriguez",
         "specialty": "Obstetrics & Gynecology",
-        "system_prompt": """You are Dr. Maria Rodriguez, an OB/GYN with expertise in women's health and hormonal influences on cardiac health.
-Your expertise is in gender-specific health considerations and hormonal factors.
-
-In council debates, you focus on:
-- Gender-specific risk factors
-- Hormonal influences on cardiac health
-- Women's health considerations
-- Psychosocial factors in recovery
-
-You bring attention to aspects often overlooked in male-dominated cardiac care.
-Speak naturally as an OB/GYN would in a medical discussion."""
+        "system_prompt": """You are Dr. Maria Rodriguez, OB/GYN. Speak in 2-3 sentences only.
+Focus exclusively on: estrogen/progesterone status and its effect on this patient's cardiovascular risk, whether hormone therapy is contraindicated post-MI, and any gender-specific symptom presentation differences that may have led to atypical MI symptoms being underrecognized.
+Only speak to the gender-specific angle — do not restate anything already covered."""
     }
 }
 
@@ -376,63 +315,44 @@ class LangGraphMedicalCouncil:
         return "consensus"
 
     def _generate_consensus(self, state: CouncilState) -> CouncilState:
-        """Generate final consensus from debate"""
+        """Generate final consensus using LLM synthesis of the debate"""
         debate_history = state["debate_history"]
 
-        # Analyze all statements for common themes
-        all_statements = [entry['response']['statement'] for entry in debate_history]
+        debate_summary = "\n".join([
+            f"{e['agent']} ({e['specialty']}): {e['response']['statement']}"
+            for e in debate_history
+        ])
 
-        # Theme analysis
-        consensus_themes = {
-            "monitoring": ["monitor", "watch", "observe", "track", "follow"],
-            "medication": ["medication", "dose", "compliance", "pills"],
-            "urgent_care": ["urgent", "immediate", "emergency", "critical"],
-            "lifestyle": ["diet", "exercise", "lifestyle", "sodium", "weight"],
-            "follow_up": ["appointment", "follow-up", "telehealth", "clinic"]
-        }
+        messages = [
+            SystemMessage(content=(
+                "You are a medical council facilitator. Synthesize the specialist debate into a final decision. "
+                "Return valid JSON only with these keys:\n"
+                "- decision: clear actionable clinical decision, 1-2 sentences\n"
+                "- doctor_report: 3-4 sentence clinical handoff summary for another care agent or physician\n"
+                "- urgency_level: one of low, medium, high, critical\n"
+                "- confidence_score: float 0.0-1.0\n"
+                "- action_items: list of 2-4 specific actions\n"
+                "Make the decision and report specific to this patient, not generic."
+            )),
+            HumanMessage(content=(
+                f"Patient: {json.dumps(state['patient_data'], indent=2)}\n\n"
+                f"Council debate:\n{debate_summary}\n\nSynthesize the consensus."
+            ))
+        ]
 
-        theme_scores = {}
-        for theme, keywords in consensus_themes.items():
-            score = sum(1 for stmt in all_statements for keyword in keywords if keyword in stmt.lower())
-            theme_scores[theme] = score
-
-        primary_theme = max(theme_scores, key=theme_scores.get)
-
-        # Generate consensus based on primary theme
-        consensus_map = {
-            "monitoring": "Close monitoring with regular vital sign checks and medication adherence reinforcement",
-            "medication": "Focus on medication compliance and adjustment, with close monitoring",
-            "urgent_care": "Urgent medical evaluation required given the clinical presentation",
-            "lifestyle": "Lifestyle modifications combined with medication management and monitoring",
-            "follow_up": "Scheduled follow-up care with specialist consultation"
-        }
-
-        consensus = consensus_map.get(primary_theme, "Individualized care plan with close monitoring")
-
-        # Generate action items
-        action_items = []
-        if theme_scores.get("medication", 0) > 0:
-            action_items.append("Ensure medication compliance and consider dose adjustments")
-        if theme_scores.get("monitoring", 0) > 0:
-            action_items.append("Implement close vital sign monitoring protocol")
-        if theme_scores.get("follow_up", 0) > 0:
-            action_items.append("Schedule appropriate follow-up appointments")
-        if theme_scores.get("lifestyle", 0) > 0:
-            action_items.append("Provide dietary and lifestyle counseling")
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, max_tokens=400)
+        result = (llm | JsonOutputParser()).invoke(messages)
 
         final_decision = {
-            "consensus_recommendation": consensus,
-            "urgency_level": "high" if theme_scores.get("urgent_care", 0) > 0 else "medium",
-            "confidence_score": min(0.95, state["convergence_score"] + 0.3),
-            "supporting_agents": len(set(entry['agent'] for entry in debate_history)),
-            "key_insights": [f"Primary focus: {primary_theme.replace('_', ' ')}"],
-            "action_items": action_items
+            "consensus_recommendation": result.get("decision", "Continue current monitoring protocol."),
+            "doctor_report": result.get("doctor_report", ""),
+            "urgency_level": result.get("urgency_level", "medium"),
+            "confidence_score": result.get("confidence_score", 0.75),
+            "supporting_agents": len(set(e['agent'] for e in debate_history)),
+            "action_items": result.get("action_items", []),
         }
 
-        return {
-            **state,
-            "final_decision": final_decision
-        }
+        return {**state, "final_decision": final_decision}
 
     def _finalize_decision(self, state: CouncilState) -> CouncilState:
         """Finalize and return the decision"""

@@ -31,6 +31,7 @@ class PatientState(BaseModel):
 
 class CouncilDecision(BaseModel):
     decision: str
+    doctor_report: str
     confidence: float
     actions: List[str]
     escalation_level: int  # 1-5, 5 being highest
@@ -40,12 +41,51 @@ class CheckinResponse(BaseModel):
     patient_state: PatientState
     needs_council: bool
 
+class AnalyzeRequest(BaseModel):
+    patient_id: str
+    age: int
+    gender: str
+    diagnosis: str
+    heart_rate: float
+    spo2: float
+    blood_pressure: Optional[str] = None
+    temperature: Optional[float] = None
+    symptoms: List[str] = []
+    medications: List[Dict] = []
+    lab_results: Optional[Dict] = None
+    lifestyle: Optional[Dict] = None
+    trigger: str = "post_mi_monitoring"
+
 # In-memory storage (in production, use database)
 patients: Dict[str, PatientState] = {}
 
 @app.get("/")
 async def root():
     return {"message": "CareRelay API is running"}
+
+@app.post("/analyze")
+async def analyze(request: AnalyzeRequest):
+    """
+    Single-call endpoint for external systems (e.g. OpenClaw).
+    Send full patient data, get back a council decision + doctor report.
+    """
+    patient_dict = request.dict()
+    council = LangGraphMedicalCouncil(max_rounds=2)
+    result = council.orchestrate_debate(patient_dict)
+    final_decision = result["final_decision"]
+
+    return {
+        "patient_id": request.patient_id,
+        "decision": final_decision["consensus_recommendation"],
+        "doctor_report": final_decision.get("doctor_report", ""),
+        "urgency_level": final_decision["urgency_level"],
+        "confidence": final_decision["confidence_score"],
+        "actions": final_decision["action_items"],
+        "escalation_level": {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(
+            final_decision["urgency_level"], 2
+        ),
+        "debate_rounds": result["convergence_state"]["rounds_completed"],
+    }
 
 @app.post("/ingest_vitals/{patient_id}")
 async def ingest_vitals(patient_id: str, vitals: PatientVitals):
@@ -209,6 +249,7 @@ async def run_agent_council(patient: PatientState, use_langgraph: bool = True) -
 
     return CouncilDecision(
         decision=final_decision["consensus_recommendation"],
+        doctor_report=final_decision.get("doctor_report", ""),
         confidence=final_decision["confidence_score"],
         actions=final_decision["action_items"],
         escalation_level={
