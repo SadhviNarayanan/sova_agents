@@ -9,6 +9,8 @@ Entry points:
   start() — launch as a non-blocking background daemon thread (use this)
   run()   — blocking loop, called internally by start()
 Data source: synthetic_data.get_data()  (swap for real source when ready)
+
+Runs as a background thread 
 """
 
 import threading
