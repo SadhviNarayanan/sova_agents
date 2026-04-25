@@ -13,10 +13,13 @@ Entry points:
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+
+import requests
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
@@ -25,6 +28,8 @@ from call_twilio import call_911, call_caregiver, text_caregiver
 from db import log_anomaly_to_db
 from big_query import fix_timestamps, get_anchor, fetch_by_timestamp
 from query import get_patient_profile
+
+DEBATE_BASE_URL = "http://localhost:8000"
 
 _thread: threading.Thread | None = None
 _stop_flag: bool = False
@@ -40,6 +45,76 @@ def calculate_polling_freq(severity: int, stage: int) -> float:
     """severity (0–2) and stage (0–5) → poll interval in minutes (minimum 30)."""
     raw = (_SEVERITY_FREQ[severity] * 0.45) + (_STAGE_LAG[stage] * 0.55)
     return max(raw, _MIN_INTERVAL_MINUTES)
+
+
+def _trigger_debate(data: dict) -> None:
+    """POST to /start-debate, stream SSE results, then re-route using escalation_level."""
+    patient_id = data.get("user_id", "unknown")
+    profile = get_patient_profile(patient_id) or {}
+
+    payload = {
+        "patient_id":       patient_id,
+        "age":              profile.get("age"),
+        "gender":           profile.get("gender"),
+        "diagnosis":        profile.get("conditions", []),
+        "heart_rate":       data.get("resting_heart_rate"),
+        "hrv":              data.get("hrv"),
+        "recovery_score":   data.get("recovery_score"),
+        "day_strain":       data.get("day_strain"),
+        "sleep_performance":data.get("sleep_performance"),
+        "respiratory_rate": data.get("respiratory_rate"),
+        "blood_pressure":   data.get("blood_pressure"),
+        "temperature":      data.get("skin_temp_deviation"),
+        "triggered_signals":data.get("triggered_signals", []),
+        "anomaly_level":    data.get("anomaly_level"),
+        "severity":         profile.get("severity"),
+        "stage":            profile.get("stage"),
+    }
+
+    try:
+        requests.post(f"{DEBATE_BASE_URL}/start-debate/{patient_id}", json=payload, timeout=10)
+    except Exception as exc:
+        print(f"[debate] POST /start-debate failed: {exc}")
+        return
+
+    try:
+        with requests.get(f"{DEBATE_BASE_URL}/stream/{patient_id}", stream=True, timeout=120) as resp:
+            event_type = None
+            for raw in resp.iter_lines():
+                if not raw:
+                    event_type = None
+                    continue
+                line = raw.decode() if isinstance(raw, bytes) else raw
+                if line.startswith("event:"):
+                    event_type = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    payload_str = line[len("data:"):].strip()
+                    if event_type == "agent_speak":
+                        try:
+                            msg = json.loads(payload_str)
+                            print(f"[debate] {msg.get('agent')}: {msg.get('statement')}")
+                        except json.JSONDecodeError:
+                            pass
+                    elif event_type == "decision":
+                        try:
+                            decision = json.loads(payload_str)
+                            level = int(decision.get("escalation_level", 0))
+                            print(f"[debate] decision → escalation_level={level}")
+                            if level == 4:
+                                _fire(call_911, data)
+                            elif level == 3:
+                                _fire(call_caregiver, data)
+                            elif level == 2:
+                                _fire(text_caregiver, data)
+                            elif level == 1:
+                                _fire(_log_anomaly, data, level)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    elif event_type == "error":
+                        print(f"[debate] stream error: {payload_str}")
+                        return
+    except Exception as exc:
+        print(f"[debate] stream error: {exc}")
 
 
 def _log_anomaly(data: dict, level: int) -> None:
@@ -70,6 +145,9 @@ def process(data: dict, anomaly: int) -> None:
         _fire(text_caregiver, data)
     elif anomaly == 1:
         _fire(_log_anomaly, data, anomaly)
+
+    if anomaly >= 2:
+        _fire(_trigger_debate, data)
 
 
 def run(user_id: str, max_ticks: int | None = None) -> None:
