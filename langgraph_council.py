@@ -157,8 +157,9 @@ def _fire_webhook(url: Optional[str], payload: Dict[str, Any]) -> None:
 
 class LangGraphMedicalCouncil:
 
-    def __init__(self, max_utterances: int = 8):
+    def __init__(self, max_utterances: int = 8, event_callback=None):
         self.max_utterances = max_utterances
+        self.event_callback = event_callback
         self.agents = {key: MedicalAgent(**config) for key, config in AGENT_CONFIGS.items()}
         self.graph = self._build_graph()
 
@@ -312,15 +313,21 @@ class LangGraphMedicalCouncil:
             "timestamp": datetime.now()
         }
 
-        _fire_webhook(state.get("webhook_url"), {
+        agent_event = {
+            "type": "agent",
             "event": "agent_response",
             "patient_id": state["patient_data"].get("patient_id"),
+            "round": entry["round"],
             "agent": agent.name,
             "specialty": agent.specialty,
             "statement": response["statement"],
             "utterance_number": total + 1,
+            "convergence": state.get("convergence_score", 0.0),
             "timestamp": response["timestamp"],
-        })
+        }
+        _fire_webhook(state.get("webhook_url"), agent_event)
+        if self.event_callback:
+            self.event_callback(agent_event)
 
         return {
             **state,
@@ -411,7 +418,8 @@ class LangGraphMedicalCouncil:
     def _finalize_decision(self, state: CouncilState) -> CouncilState:
         decision = state.get("final_decision")
         if decision:
-            _fire_webhook(state.get("webhook_url"), {
+            decision_event = {
+                "type": "decision",
                 "event": "decision",
                 "patient_id": state["patient_data"].get("patient_id"),
                 "immediate_action": decision.get("immediate_action", "Sleep"),
@@ -420,7 +428,11 @@ class LangGraphMedicalCouncil:
                 "urgency_level": decision["urgency_level"],
                 "confidence_score": decision["confidence_score"],
                 "action_items": decision.get("action_items", []),
-            })
+            }
+            _fire_webhook(state.get("webhook_url"), decision_event)
+            if self.event_callback:
+                self.event_callback(decision_event)
+                self.event_callback({"type": "done"})
         return state
 
     def orchestrate_debate(self, patient_data: Dict[str, Any], webhook_url: Optional[str] = None) -> Dict[str, Any]:

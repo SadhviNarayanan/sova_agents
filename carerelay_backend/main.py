@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from agents import AGENT_PROMPTS
 import anthropic  # For Claude API integration
@@ -75,6 +76,10 @@ class AnalyzeRequest(BaseModel):
 
 # In-memory storage (in production, use database)
 patients: Dict[str, PatientState] = {}
+
+# Per-patient event queues for SSE streaming
+debate_queues: Dict[str, asyncio.Queue] = {}
+executor = ThreadPoolExecutor()
 
 @app.get("/")
 async def root():
@@ -277,6 +282,60 @@ async def run_agent_council(patient: PatientState, use_langgraph: bool = True) -
             "critical": 4
         }.get(final_decision["urgency_level"], 2)
     )
+
+@app.post("/start-debate/{patient_id}")
+async def start_debate(patient_id: str, request: AnalyzeRequest):
+    """
+    OpenClaw calls this. Starts the debate in the background and returns immediately.
+    - Streams doctor events to frontend via GET /stream/{patient_id}
+    - Pushes final decision + immediate_action to webhook_url when done
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    debate_queues[patient_id] = queue
+    loop = asyncio.get_event_loop()
+
+    def on_event(event):
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def run():
+        council = LangGraphMedicalCouncil(max_utterances=8, event_callback=on_event)
+        council.orchestrate_debate(request.model_dump(), webhook_url=request.webhook_url)
+
+    loop.run_in_executor(executor, run)
+
+    return {
+        "status": "debate started",
+        "patient_id": patient_id,
+        "stream_url": f"/stream/{patient_id}",
+        "note": "Final decision will be POSTed to webhook_url when complete"
+    }
+
+
+@app.get("/stream/{patient_id}")
+async def stream_debate(patient_id: str):
+    """
+    Frontend calls this. Pure SSE — just waits and receives events as doctors speak.
+    Never needs to send any data.
+    """
+    async def generate():
+        queue = debate_queues.get(patient_id)
+        if not queue:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No active debate for this patient'})}\n\n"
+            return
+
+        while True:
+            event = await queue.get()
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+            if event.get("type") in ("done", "error"):
+                break
+
+        debate_queues.pop(patient_id, None)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no"
+    })
+
 
 @app.get("/ui", response_class=HTMLResponse)
 async def ui():
