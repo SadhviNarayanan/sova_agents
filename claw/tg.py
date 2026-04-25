@@ -2,16 +2,14 @@
 Telegram bot — text conversation interface for CareRelay.
 
 Each chat has its own session. Users send text messages and the bot
-calls the backend API for a reply.
+replies via GPT-4o using the OpenAI key from config.json.
 
-Required env vars / config.json:
-    TELEGRAM_BOT_TOKEN   — from @BotFather
-    CHAT_API_URL         — backend endpoint, e.g. http://localhost:8000/chat
-                           POST {"message": str, "session_id": str}
-                           expects {"reply": str}
+Required config.json keys:
+    telegram.bot_token       — from @BotFather
+    backend.chat_api         — OpenAI API key
 
 Optional:
-    TELEGRAM_ALLOWED_IDS — comma-separated chat IDs to whitelist (leave unset to allow all)
+    TELEGRAM_ALLOWED_IDS env var — comma-separated chat IDs to whitelist
 """
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import Union
 
+from openai import OpenAI
 from telegram import Update, constants
 from telegram.ext import (
     Application,
@@ -61,26 +60,30 @@ def _load_config() -> dict:
         return json.load(f)
 
 
-def _call_backend(message: str, session_id: str) -> str:
-    url = os.environ.get("CHAT_API_URL") or _load_config().get("backend", {}).get("chat_api_url", "")
-    url = url.rstrip("/")
-    if not url:
-        raise EnvironmentError("chat_api_url is not set in config.json or CHAT_API_URL env var.")
+SYSTEM_PROMPT = (
+    "You are CareRelay, a compassionate AI care assistant helping patients "
+    "recover after a hospital stay. Keep responses concise, warm, and clinically "
+    "aware. If a patient describes urgent symptoms, advise them to call 911 or "
+    "their care team immediately."
+)
 
-    payload = json.dumps({"message": message, "session_id": session_id}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+
+def _get_openai_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY") or _load_config().get("backend", {}).get("chat_api")
+    if not api_key:
+        raise EnvironmentError("OpenAI API key not found in config.json or OPENAI_API_KEY env var.")
+    return OpenAI(api_key=api_key)
+
+
+def _call_backend(message: str, history: list) -> str:
+    client = _get_openai_client()
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        max_tokens=300,
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode())
-
-    reply = data.get("reply") or data.get("response") or data.get("text")
-    if not reply:
-        raise ValueError(f"Backend returned no reply field: {data}")
-    return reply
+    return response.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +136,7 @@ async def handle_text(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.chat.send_action(constants.ChatAction.TYPING)
 
     try:
-        reply = _call_backend(user_text, str(chat_id))
+        reply = _call_backend(user_text, session["history"])
     except Exception as exc:
         log.error("Backend error: %s", exc)
         await update.message.reply_text(

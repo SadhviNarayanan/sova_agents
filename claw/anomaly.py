@@ -4,12 +4,12 @@ import json
 import pickle
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from model import (
+from carerelay_backend.model import (
     HybridConfig,
     TEMPORAL_TARGETS,
     add_time_series_features,
@@ -154,8 +154,8 @@ def _fallback_rule_based_level(snapshot: Dict[str, Any]) -> int:
 
 def infer_anomaly_level(
     snapshot: Dict[str, Any],
-    history_rows: List[Dict[str, Any]] | None = None,
-    model_path: Path | None = None,
+    history_rows: Optional[List[Dict[str, Any]]] = None,
+    model_path: Optional[Path] = None,
 ) -> int:
     """
     In-process anomaly scoring API for claw.
@@ -164,7 +164,7 @@ def infer_anomaly_level(
     """
     history_rows = history_rows or []
     if model_path is None:
-        model_path = Path(__file__).resolve().parent.parent / "Anomaly_Detection_mod" / "artifacts" / "hybrid_detector_model.pkl"
+        model_path = Path(__file__).resolve().parent / "model" / "hybrid_detector_model.pkl"
 
     user_id = str(snapshot.get("user_id", "unknown"))
     rows = [row for row in history_rows if str(row.get("user_id", user_id)) == user_id]
