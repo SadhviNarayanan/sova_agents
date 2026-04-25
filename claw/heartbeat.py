@@ -17,12 +17,14 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from anomaly import infer_anomaly_level
 from call_twilio import call_911, call_caregiver, text_caregiver
 from db import log_anomaly_to_db
 from synthetic_data import get_data
 
 _thread: threading.Thread | None = None
 _stop_flag: bool = False
+_history_by_user: dict[str, list[dict]] = {}
 
 # Polling frequency weights (seconds)
 _SEVERITY_FREQ = {0: 60, 1: 30, 2: 15}
@@ -78,7 +80,11 @@ def run(max_ticks: int | None = None) -> None:
         data     = get_data()
         severity = data.get("severity", 1)
         stage    = data.get("stage", 2)
-        anomaly  = data.get("anomaly_level", 0)
+        user_id = str(data.get("user_id", "unknown"))
+        user_history = _history_by_user.get(user_id, [])
+        anomaly = infer_anomaly_level(data, history_rows=user_history)
+        data["anomaly_level"] = anomaly
+        _history_by_user[user_id] = (user_history + [data])[-60:]
         interval = calculate_polling_freq(severity, stage)
 
         process(data, anomaly)
