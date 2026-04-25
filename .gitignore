@@ -1,0 +1,2 @@
+# Ignore local Telegram bot config with secrets
+claw/telegram_config.json
