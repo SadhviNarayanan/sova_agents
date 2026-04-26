@@ -17,7 +17,7 @@ import anthropic  # For Claude API integration
 # Add parent directory to path to import agentic_convo and langgraph_council
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agentic_convo import MedicalCouncilOrchestrator
-from langgraph_council import LangGraphMedicalCouncil
+from langgraph_council import AGENT_CONFIGS, LangGraphMedicalCouncil
 from claw.call_twilio import call_caregiver
 from claw.query import get_latest_vitals, get_patient_profile
 
@@ -110,6 +110,11 @@ class SimulationModeResponse(BaseModel):
     mode: str
     statusUrl: str
 
+class SpecialistResponse(BaseModel):
+    id: str
+    name: str
+    specialty: str
+
 class AnalyzeRequest(BaseModel):
     # Patient profile
     patientId: str
@@ -160,6 +165,14 @@ USE_BIGQUERY_VITALS = os.getenv("SOVA_USE_BIGQUERY_VITALS", "false").lower() in 
 @app.get("/")
 async def root():
     return {"message": "CareRelay API is running"}
+
+
+@app.get("/v1/specialists", response_model=List[SpecialistResponse])
+async def specialists():
+    return [
+        SpecialistResponse(id=key, name=config["name"], specialty=config["specialty"])
+        for key, config in AGENT_CONFIGS.items()
+    ]
 
 SEVERITY_LABELS = {0: "low", 1: "medium", 2: "high"}
 STAGE_LABELS = {
@@ -512,6 +525,14 @@ def start_debate_session(patient_id: str, request: AnalyzeRequest, loop: asyncio
 
     def on_event(event):
         loop.call_soon_threadsafe(publish, event)
+
+    publish({
+        "type": "started",
+        "event": "started",
+        "patient_id": patient_id,
+        "message": "Sova specialist council is joining.",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
     def run():
         try:
