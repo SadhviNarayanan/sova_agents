@@ -10,7 +10,7 @@ Tables (all in automaticbalancetransfer.sova):
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from google.cloud import bigquery
 
@@ -126,6 +126,37 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
     return fixed
 
 
+def insert_vitals() -> None:
+    """Insert a new row into vitals."""
+    client = _client()
+    patient_id = "startID"  
+    timestamp = datetime.now()
+    ts = timestamp.isoformat()
+    client.query(f"""
+                    INSERT INTO {_PROFILE_TABLE} (patientId, Name, Age, Conditions, RiskLevel, DischargeDate)
+                    VALUES ('{patient_id}', 'John Doe', 65, 'Hypertension, Diabetes', 'High', TIMESTAMP('{ts}'))
+                """).result()
+    heart_rate, blood_pressure, temperature = 80, "120/80", 98.6
+    for i in range(3):  # retry up to 3 times in case of transient errors
+        try:
+            if i < 2:
+
+                client.query(f"""
+                    INSERT INTO {_VITALS_TABLE} (patientId, TimeStamp, HeartRate, BloodPressure, Temperature)
+                    VALUES ('{patient_id}', TIMESTAMP('{ts}'), {heart_rate}, '{blood_pressure}', {temperature})
+                """).result()
+            else:
+                heart_rate = "150/92"
+                client.query(f"""
+                    INSERT INTO {_VITALS_TABLE} (patientId, TimeStamp, HeartRate, BloodPressure, Temperature)
+                    VALUES ('{patient_id}', TIMESTAMP('{ts}'), {heart_rate}, '{blood_pressure}', {temperature})
+                """).result()
+            ts += 30 # increment timestamp for next row to avoid duplicates
+            break                   
+        except Exception as e:
+            print(f"Error occurred while inserting vitals for patient {patient_id}: {e}")
+            time.sleep(1)  # Wait before retrying   
+
 def get_latest_vitals(patient_id: str) -> dict:
     """Fetch the most-recent vitals row for a patient."""
     rows = list(_client().query(f"""
@@ -136,3 +167,7 @@ def get_latest_vitals(patient_id: str) -> dict:
         LIMIT 1
     """))
     return dict(rows[0]) if rows else {}
+
+
+if __name__ == "__main__":
+    insert_vitals()

@@ -36,11 +36,11 @@ _stop_flag: bool = False
 _SEVERITY_FREQ = {0: 90, 1: 60, 2: 30}
 _STAGE_LAG     = {0: 10, 1: 10, 2: 20, 3: 30, 4: 60, 5: 120}
 
-_MIN_INTERVAL_MINUTES = 30
+_MIN_INTERVAL_MINUTES = 0.5
 
 
 def calculate_polling_freq(severity: int, stage: int) -> float:
-    """severity (0–2) and stage (0–5) → poll interval in minutes (minimum 30)."""
+    """severity (0–2) and stage (0–5) → poll interval in minutes (minimum 30s)."""
     raw = (_SEVERITY_FREQ[severity] * 0.45) + (_STAGE_LAG[stage] * 0.55)
     return max(raw, _MIN_INTERVAL_MINUTES)
 
@@ -76,7 +76,7 @@ def _trigger_debate(data: dict, interval: float = 0) -> None:
     }
 
     try:
-        resp = requests.post(f"{DEBATE_BASE_URL}/analyze", json=payload, timeout=120)
+        resp = requests.post(f"{DEBATE_BASE_URL}/analyze", json=payload, timeout=300)
         resp.raise_for_status()
         result = resp.json()
     except Exception as exc:
@@ -92,8 +92,6 @@ def _trigger_debate(data: dict, interval: float = 0) -> None:
         _fire(call_caregiver, data)
     elif level == 2:
         _fire(text_caregiver, data)
-    else:
-        _fire(_log_anomaly, data, level)
 
 
 def _log_anomaly(data: dict, level: int) -> None:
@@ -147,8 +145,10 @@ def run(user_id: str, max_ticks: int | None = None) -> None:
         #copilot
         if anomaly == 4:
             _fire(call_caregiver, data)
-        elif anomaly > 0:
+        elif anomaly > 1:
             _fire(_trigger_debate, data, interval)
+        else:
+            _fire(_log_anomaly, data, anomaly)
         print(f"   next poll in {interval:.0f}min  (severity={severity}, stage={stage}, anomaly={anomaly})\n")
 
         tick += 1
@@ -156,6 +156,7 @@ def run(user_id: str, max_ticks: int | None = None) -> None:
             time.sleep(interval * 60)
 
     print("Heartbeat monitor stopped")
+    
 
 
 def start(user_id: str) -> None:
