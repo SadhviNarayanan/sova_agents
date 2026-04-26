@@ -244,7 +244,7 @@ def simulated_vitals_row(patient_id: str) -> dict:
     """
     now = datetime.now(timezone.utc)
     seed = sum(ord(ch) for ch in patient_id)
-    t = now.timestamp() / 5.0
+    t = now.timestamp() / 2.0
     wave = math.sin(t + seed)
     slow_wave = math.sin((t / 3.0) + seed)
     oxygen_wave = math.sin((t / 2.0) + seed)
