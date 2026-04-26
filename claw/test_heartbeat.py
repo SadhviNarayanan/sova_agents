@@ -51,6 +51,43 @@ from anomaly import _fallback_rule_based_level  # noqa: E402
 
 _ANCHOR = datetime(2026, 4, 1, 6, 0, 0)
 
+# Synthetic patient snapshots provided as seed data.
+# "current" = the abnormal reading that should trigger escalation.
+# "history" = values near each patient's baseline (normal prior ticks).
+_PAT_L4_002_CURRENT = {
+    "user_id": "PAT-SYN-L4-002", "date": "2026-04-26T00:00:00",
+    "recovery_score": 16.0, "day_strain": 18.4,
+    "hrv": 28.0, "hrv_baseline": 54.0,
+    "resting_heart_rate": 99.0, "rhr_baseline": 74.0,
+    "respiratory_rate": 21.0, "skin_temp_deviation": 1.4,
+    "sleep_performance": 48.0,
+}
+_PAT_L4_002_HISTORY = {  # near-baseline — should score 0–1
+    "user_id": "PAT-SYN-L4-002", "date": "2026-04-20T00:00:00",
+    "recovery_score": 68.0, "day_strain": 9.0,
+    "hrv": 52.0, "hrv_baseline": 54.0,
+    "resting_heart_rate": 76.0, "rhr_baseline": 74.0,
+    "respiratory_rate": 15.5, "skin_temp_deviation": 0.1,
+    "sleep_performance": 74.0,
+}
+
+_PAT_L3_001_CURRENT = {
+    "user_id": "PAT-SYN-L3-001", "date": "2026-04-29T00:00:00",
+    "recovery_score": 29.0, "day_strain": 16.2,
+    "hrv": 37.0, "hrv_baseline": 58.0,
+    "resting_heart_rate": 90.0, "rhr_baseline": 74.0,
+    "respiratory_rate": 19.6, "skin_temp_deviation": 0.9,
+    "sleep_performance": 56.0,
+}
+_PAT_L3_001_HISTORY = {  # near-baseline — should score 0–1
+    "user_id": "PAT-SYN-L3-001", "date": "2026-04-22T00:00:00",
+    "recovery_score": 71.0, "day_strain": 10.5,
+    "hrv": 56.0, "hrv_baseline": 58.0,
+    "resting_heart_rate": 75.0, "rhr_baseline": 74.0,
+    "respiratory_rate": 15.0, "skin_temp_deviation": 0.2,
+    "sleep_performance": 78.0,
+}
+
 
 def _profile(severity: int = 1, stage: int = 2) -> dict:
     discharge = (date.today() - timedelta(days=14)).isoformat()
@@ -106,7 +143,7 @@ def _whoop(
 class TestCalculatePollingFreq(TestCase):
 
     def test_minimum_floor_enforced(self):
-        self.assertGreaterEqual(heartbeat.calculate_polling_freq(0, 0), 30)
+        self.assertGreaterEqual(heartbeat.calculate_polling_freq(0, 0), 0.25)
 
     def test_higher_severity_shorter_or_equal_interval(self):
         low  = heartbeat.calculate_polling_freq(0, 0)
@@ -119,11 +156,11 @@ class TestCalculatePollingFreq(TestCase):
         self.assertGreaterEqual(late, early)
 
     def test_known_floor_case(self):
-        # severity=2 stage=0: (30*0.45)+(10*0.55)=19 → floored to 30
-        self.assertEqual(heartbeat.calculate_polling_freq(2, 0), 30.0)
+        # severity=2 stage=0: (30*0.45)+(10*0.55)=19 → not floored (19 > 0.5)
+        self.assertAlmostEqual(heartbeat.calculate_polling_freq(2, 0), 19.0)
 
     def test_known_no_floor_case(self):
-        # severity=2 stage=5: (30*0.45)+(120*0.55)=79.5 > 30
+        # severity=2 stage=5: (30*0.45)+(120*0.55)=79.5
         self.assertAlmostEqual(heartbeat.calculate_polling_freq(2, 5), 79.5)
 
     def test_all_severity_stage_combos_are_positive(self):
@@ -386,6 +423,17 @@ class TestAnomalyLevelScenarios(TestCase):
                                     rhr=72, rhr_baseline=55, sleep_perf=45),      3, 4),
         ("critical_post_mi",   dict(recovery=12, hrv=20, hrv_baseline=65,
                                     rhr=82, rhr_baseline=55),                     4, 4),
+        # Synthetic seed patients
+        ("PAT-SYN-L4-002_current",  dict(recovery=16, hrv=28, hrv_baseline=54,
+                                          rhr=99, rhr_baseline=74,
+                                          skin_temp_dev=1.4, sleep_perf=48),      4, 4),
+        ("PAT-SYN-L4-002_history",  dict(recovery=68, hrv=52, hrv_baseline=54,
+                                          rhr=76, rhr_baseline=74),               0, 1),
+        ("PAT-SYN-L3-001_current",  dict(recovery=29, hrv=37, hrv_baseline=58,
+                                          rhr=90, rhr_baseline=74,
+                                          skin_temp_dev=0.9, sleep_perf=56),      2, 3),
+        ("PAT-SYN-L3-001_history",  dict(recovery=71, hrv=56, hrv_baseline=58,
+                                          rhr=75, rhr_baseline=74),               0, 1),
     ]
 
     def test_scenarios(self):

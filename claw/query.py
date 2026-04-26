@@ -10,7 +10,7 @@ Tables (all in automaticbalancetransfer.sova):
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 
 from google.cloud import bigquery
 
@@ -127,35 +127,55 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
 
 
 def insert_vitals() -> None:
-    """Insert a new row into vitals."""
+    """Seed patientProfile + vital
+    """
     client = _client()
-    patient_id = "startID"  
-    timestamp = datetime.now()
-    ts = timestamp.isoformat()
-    client.query(f"""
-                    INSERT INTO {_PROFILE_TABLE} (patientId, Name, Age, Conditions, RiskLevel, DischargeDate)
-                    VALUES ('{patient_id}', 'John Doe', 65, 'Hypertension, Diabetes', 'High', TIMESTAMP('{ts}'))
-                """).result()
-    heart_rate, blood_pressure, temperature = 80, "120/80", 98.6
-    for i in range(3):  # retry up to 3 times in case of transient errors
-        try:
-            if i < 2:
 
-                client.query(f"""
-                    INSERT INTO {_VITALS_TABLE} (patientId, TimeStamp, HeartRate, BloodPressure, Temperature)
-                    VALUES ('{patient_id}', TIMESTAMP('{ts}'), {heart_rate}, '{blood_pressure}', {temperature})
-                """).result()
-            else:
-                heart_rate = "150/92"
-                client.query(f"""
-                    INSERT INTO {_VITALS_TABLE} (patientId, TimeStamp, HeartRate, BloodPressure, Temperature)
-                    VALUES ('{patient_id}', TIMESTAMP('{ts}'), {heart_rate}, '{blood_pressure}', {temperature})
-                """).result()
-            ts += 30 # increment timestamp for next row to avoid duplicates
-            break                   
+    profile = {
+        "patientId": "startID",
+        "Age": 68, "Gender": "Female",
+        "Surgery": "Post-cardiac event", "DischargeDate": "2026-04-10",
+        "RiskLevel": "high", "BloodPressure": "138/86", "HeartRate": 74,
+        "Allergies": "None", "CurrentMedications": "Metoprolol, Aspirin",
+        "EmergencyContactName": "Family Contact", "EmergencyContactPhone": "+15125550101",
+    }
+
+    try:
+        client.query(f"""
+            INSERT INTO {_PROFILE_TABLE}
+              (patientId, Age, Gender, Surgery, DischargeDate, RiskLevel,
+               BloodPressure, HeartRate, Allergies, CurrentMedications,
+               EmergencyContactName, EmergencyContactPhone)
+            VALUES (
+              '{profile["patientId"]}', {profile["Age"]}, '{profile["Gender"]}',
+              '{profile["Surgery"]}', DATE('{profile["DischargeDate"]}'), '{profile["RiskLevel"]}',
+              '{profile["BloodPressure"]}', {profile["HeartRate"]}, '{profile["Allergies"]}',
+              '{profile["CurrentMedications"]}', '{profile["EmergencyContactName"]}',
+              '{profile["EmergencyContactPhone"]}'
+            )
+        """).result()
+        print(f"Inserted profile for {profile['patientId']}")
+    except Exception as e:
+        print(f"Error inserting profile for {profile['patientId']}: {e}")
+
+    # (timestamp, heart_rate, temperature) — all for PAT-SYN-L4-002
+    ts = datetime.now()
+    vitals_rows = [
+        (ts, 75, 37.1),
+        (ts + timedelta(seconds=10), 76, 37.0),
+        (ts + timedelta(seconds=20), 74, 37.0),
+        (ts + timedelta(seconds=30), 99, 38.4),  # abnormal current
+    ]
+
+    for ts, heart_rate, temperature in vitals_rows:
+        try:
+            client.query(f"""
+                INSERT INTO {_VITALS_TABLE} (patientId, TimeStamp, HeartRate, Temperature)
+                VALUES ('{profile["patientId"]}', TIMESTAMP('{ts}'), {heart_rate}, {temperature})
+            """).result()
+            print(f"Inserted vitals for {profile['patientId']} at {ts}")
         except Exception as e:
-            print(f"Error occurred while inserting vitals for patient {patient_id}: {e}")
-            time.sleep(1)  # Wait before retrying   
+            print(f"Error inserting vitals for {profile['patientId']} at {ts}: {e}")
 
 def get_latest_vitals(patient_id: str) -> dict:
     """Fetch the most-recent vitals row for a patient."""

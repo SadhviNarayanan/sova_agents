@@ -33,10 +33,10 @@ _thread: threading.Thread | None = None
 _stop_flag: bool = False
 
 # Polling frequency weights (minutes). Higher severity = shorter interval.
-_SEVERITY_FREQ = {0: 90, 1: 60, 2: 30}
-_STAGE_LAG     = {0: 10, 1: 10, 2: 20, 3: 30, 4: 60, 5: 120}
+_SEVERITY_FREQ = {0: 5, 1: 3, 2: 1}
+_STAGE_LAG     = {0: 1, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
 
-_MIN_INTERVAL_MINUTES = 0.5
+_MIN_INTERVAL_MINUTES = 0.25
 
 
 def calculate_polling_freq(severity: int, stage: int) -> float:
