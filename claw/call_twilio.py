@@ -1,5 +1,5 @@
 """
-call_twilio.py — outbound call and alert dispatch for CareRelay anomalies.
+call_twilio.py — outbound call and alert dispatch for SOVA anomalies.
 
   call_911       — outbound Twilio call to 911 with patient name, address, conditions
   call_caregiver — outbound Twilio call to caregiver with vitals + conditions
@@ -71,7 +71,7 @@ def call_911(data: dict | None = None) -> None:
         f"Patient name: {patient['name']}. "
         f"Address: {patient['address']}. "
         f"Known conditions: {', '.join(patient['conditions'])}. "
-        f"This is an automated CareRelay emergency alert. Please dispatch immediately."
+        f"This is an automated alert from SOVA, your AI health assistant. Please dispatch immediately."
     )
     resp = VoiceResponse()
     resp.say(script)
@@ -92,7 +92,7 @@ def call_caregiver(data: dict | None = None) -> None:
     client = _twilio_client(cfg)
 
     script = (
-        f"Hello {patient['caregiver_name']}, this is CareRelay calling about {patient['name']}. "
+        f"Hello {patient['caregiver_name']}, this is SOVA, an AI health assistant, calling about {patient['name']}. "
         f"An anomaly has been detected. Urgency level: {_urgency_word(data)}. "
         f"Current vitals: recovery score {data.get('recovery_score', 'unavailable')} out of 100, "
         f"HRV {data.get('hrv', 'unavailable')} milliseconds, "
@@ -119,7 +119,7 @@ def text_caregiver(data: dict | None = None) -> None:
     tg = cfg["telegram"]
 
     text = (
-        f"<b>CareRelay Alert — {patient['name']}</b>\n\n"
+        f"<b>SOVA Alert — {patient['name']}</b>\n\n"
         f"<b>Urgency:</b> {_urgency_emoji(data)}\n\n"
         f"<b>Issue:</b> Anomaly detected in live vitals — immediate review needed.\n\n"
         f"<b>Conditions:</b> {', '.join(patient['conditions'])}\n\n"
