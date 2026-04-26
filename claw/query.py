@@ -127,8 +127,7 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
 
 
 def insert_vitals() -> None:
-    """Seed patientProfile + vital
-    """
+    """Seed patientProfile + vitals for the demo patient."""
     client = _client()
 
     profile = {
@@ -158,24 +157,31 @@ def insert_vitals() -> None:
     except Exception as e:
         print(f"Error inserting profile for {profile['patientId']}: {e}")
 
-    # (timestamp, heart_rate, temperature) — all for PAT-SYN-L4-002
-    ts = datetime.now()
+    now = datetime.now()
+    # (offset_seconds, heart_rate, blood_pressure, temperature)
+    # historical rows near rhr_baseline=74; final row is current abnormal
     vitals_rows = [
-        (ts, 75, 37.1),
-        (ts + timedelta(seconds=10), 76, 37.0),
-        (ts + timedelta(seconds=20), 74, 37.0),
-        (ts + timedelta(seconds=30), 99, 38.4),  # abnormal current
+        (0,  73, "136/84", 37.1),
+        (10, 75, "137/85", 37.0),
+        (20, 74, "138/86", 37.0),
+        (30, 99, "148/94", 38.4),
     ]
 
-    for ts, heart_rate, temperature in vitals_rows:
+    pid = profile["patientId"]
+    for offset_seconds, heart_rate, blood_pressure, temperature in vitals_rows:
+        ts = now + timedelta(seconds=offset_seconds)
         try:
             client.query(f"""
-                INSERT INTO {_VITALS_TABLE} (patientId, TimeStamp, HeartRate, Temperature)
-                VALUES ('{profile["patientId"]}', TIMESTAMP('{ts}'), {heart_rate}, {temperature})
+                INSERT INTO {_VITALS_TABLE}
+                  (patientId, TimeStamp, HeartRate, BloodPressure, Temperature)
+                VALUES (
+                  '{pid}', TIMESTAMP('{ts.isoformat()}'),
+                  {heart_rate}, '{blood_pressure}', {temperature}
+                )
             """).result()
-            print(f"Inserted vitals for {profile['patientId']} at {ts}")
+            print(f"Inserted vitals for {pid} at {ts}")
         except Exception as e:
-            print(f"Error inserting vitals for {profile['patientId']} at {ts}: {e}")
+            print(f"Error inserting vitals for {pid} at {ts}: {e}")
 
 def get_latest_vitals(patient_id: str) -> dict:
     """Fetch the most-recent vitals row for a patient."""
