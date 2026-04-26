@@ -878,7 +878,8 @@ def specialist_log(event: str, **metadata):
                 **safe_metadata,
             },
             default=str,
-        )
+        ),
+        flush=True,
     )
 
 
@@ -1170,6 +1171,49 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
             base64Chars=len(audio),
         )
 
+    async def send_spoken_status(text: str, reason: str):
+        specialist_log(
+            "spoken.status.started",
+            patientId=patient_id,
+            specialistId=specialist["id"],
+            sessionId=session_id,
+            reason=reason,
+            textChars=len(text),
+        )
+        try:
+            audio = required_tts_audio(
+                text,
+                patient_id=patient_id,
+                specialist=specialist,
+                session_id=session_id,
+                phase=reason,
+            )
+            await send_event({
+                "type": "agent.audio",
+                "sessionId": session_id,
+                "turnId": f"status-{reason}",
+                "format": audio["format"],
+                "audioBase64": audio["audio"],
+            })
+            specialist_log(
+                "spoken.status.sent",
+                patientId=patient_id,
+                specialistId=specialist["id"],
+                sessionId=session_id,
+                reason=reason,
+                format=audio["format"],
+                base64Chars=len(audio["audio"]),
+            )
+        except Exception as exc:
+            specialist_log(
+                "spoken.status.failed",
+                patientId=patient_id,
+                specialistId=specialist["id"],
+                sessionId=session_id,
+                reason=reason,
+                error=str(exc),
+            )
+
     await websocket.send_json({
         "type": "session.started",
         "sessionId": session_id,
@@ -1232,6 +1276,9 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                 return
             if event_type == "audio.speech_start":
                 session["reply_generation"] = session.get("reply_generation", 0) + 1
+                session["audio_chunks"] = []
+                session["audio_chunk_count"] = 0
+                session["audio_byte_count"] = 0
                 if reply_task and not reply_task.done():
                     reply_task.cancel()
                 specialist_log(
@@ -1279,7 +1326,7 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     session["audio_byte_count"] = 0
                     if payload.get("format") == "pcm16":
                         audio_seconds = len(audio_bytes) / 32_000
-                        if audio_seconds < 0.65:
+                        if audio_seconds < 0.25:
                             specialist_log(
                                 "audio.turn.too_short",
                                 patientId=patient_id,
@@ -1288,6 +1335,14 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                                 audioSeconds=round(audio_seconds, 2),
                             )
                             continue
+                        if audio_seconds < 0.45:
+                            specialist_log(
+                                "audio.turn.borderline_short",
+                                patientId=patient_id,
+                                specialistId=specialist["id"],
+                                sessionId=session_id,
+                                audioSeconds=round(audio_seconds, 2),
+                            )
                         audio_bytes = pcm16_to_wav_bytes(audio_bytes)
                         audio_format = "wav"
                     else:
@@ -1295,14 +1350,11 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     user_text = transcribe_audio(audio_bytes, audio_format=audio_format).strip()
                 except Exception as exc:
                     specialist_log("stt.request.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
-                    await websocket.send_json({
-                        "type": "session.error",
-                        "sessionId": session_id,
-                        "message": "Still listening.",
-                    })
+                    await send_spoken_status("I did not catch that clearly. Could you say that once more?", "stt_failed")
                     continue
                 if not user_text:
                     specialist_log("stt.empty", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
+                    await send_spoken_status("I did not catch that clearly. Could you say that once more?", "stt_empty")
                     continue
                 event_type = "user.transcript.final"
                 payload = {"text": user_text}
