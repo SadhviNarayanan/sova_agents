@@ -1,0 +1,75 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: dummy
+      ANTHROPIC_API_KEY: dummy
+      TWILIO_ACCOUNT_SID: dummy
+      TWILIO_AUTH_TOKEN: dummy
+      TWILIO_PHONE_NUMBER: "+15555550100"
+      CAREGIVER_PHONE_NUMBER: "+15555550101"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: carerelay_backend/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r carerelay_backend/requirements.txt
+
+      - name: Compile Python
+        run: python -m compileall carerelay_backend claw -q
+
+      - name: Verify FastAPI routes import
+        run: |
+          python - <<'PY'
+          from carerelay_backend.main import app
+
+          routes = {route.path for route in app.routes}
+          required = {
+              "/",
+              "/v1/patients/{patient_id}/status",
+              "/start-debate/{patient_id}",
+              "/stream/{patient_id}",
+          }
+          missing = sorted(required - routes)
+          if missing:
+              raise SystemExit(f"Missing FastAPI routes: {missing}")
+          print("FastAPI routes OK")
+          PY
+
+      - name: Run heartbeat tests
+        run: python claw/test_heartbeat.py
+
+  render-smoke:
+    runs-on: ubuntu-latest
+    needs: backend
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Check deployed endpoint shape
+        run: |
+          set -euo pipefail
+          url="https://sova-agents.onrender.com/openapi.json"
+          curl --retry 6 --retry-delay 20 --retry-all-errors --max-time 15 -fsS "$url" > openapi.json
+          python - <<'PY'
+          import json
+
+          with open("openapi.json") as f:
+              api = json.load(f)
+          paths = set(api.get("paths", {}))
+          if "/v1/patients/{patient_id}/status" not in paths:
+              raise SystemExit("Render is not serving /v1/patients/{patient_id}/status yet")
+          print("Render route visible")
+          PY
