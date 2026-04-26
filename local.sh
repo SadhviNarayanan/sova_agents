@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-PORT="${PORT:-8000}"
+PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
 
 if [[ -x "$ROOT/.venv/bin/python" ]]; then

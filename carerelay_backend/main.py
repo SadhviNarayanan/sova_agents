@@ -1140,7 +1140,17 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
 
     async def send_event(payload: dict):
         async with send_lock:
-            await websocket.send_json(payload)
+            try:
+                await websocket.send_json(payload)
+            except RuntimeError as exc:
+                specialist_log(
+                    "websocket.send.skipped",
+                    patientId=patient_id,
+                    specialistId=specialist["id"],
+                    sessionId=session_id,
+                    eventType=payload.get("type"),
+                    error=str(exc),
+                )
 
     async def generate_and_send_reply(generation: int, user_text: str):
         try:
