@@ -11,6 +11,7 @@ import os
 import sys
 import asyncio
 import threading
+import time
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -829,7 +830,8 @@ def call_context_summary(status: PatientStatusResponse, specialist: dict, profil
         f"blood pressure {vitals.bloodPressure}, temperature {vitals.temperature}, sleep {vitals.sleepHours}. "
         f"Trajectory: {trajectory}. "
         f"Profile: {'; '.join(profile_parts) if profile_parts else 'not available'}. "
-        "Do not diagnose definitively. Give calm, short, practical guidance and advise urgent escalation for severe symptoms."
+        "Do not diagnose definitively. Reply in one short spoken sentence unless the patient asks for detail. "
+        "Advise urgent escalation for severe symptoms."
     )
 
 
@@ -864,19 +866,27 @@ def llm_specialist_reply(context: str, user_text: str) -> str:
 
     from openai import OpenAI
 
-    specialist_log("llm.request.started", textChars=len(user_text))
-    client = OpenAI(api_key=api_key)
+    started = time.perf_counter()
+    model = os.getenv("SOVA_SPECIALIST_MODEL", "gpt-4o-mini")
+    max_tokens = int(os.getenv("SOVA_SPECIALIST_MAX_TOKENS", "80"))
+    temperature = float(os.getenv("SOVA_SPECIALIST_TEMPERATURE", "0.2"))
+    timeout_seconds = float(os.getenv("SOVA_OPENAI_TIMEOUT_SECONDS", "8"))
+    specialist_log("llm.request.started", textChars=len(user_text), model=model, maxTokens=max_tokens)
+    client = OpenAI(api_key=api_key, timeout=timeout_seconds)
     response = client.chat.completions.create(
-        model=os.getenv("SOVA_SPECIALIST_MODEL", "gpt-4o-mini"),
+        model=model,
         messages=[
-            {"role": "system", "content": context},
+            {
+                "role": "system",
+                "content": context + " Keep every response under 18 words and sound natural on a phone call.",
+            },
             {"role": "user", "content": user_text},
         ],
-        max_tokens=140,
-        temperature=0.3,
+        max_tokens=max_tokens,
+        temperature=temperature,
     )
     reply = response.choices[0].message.content.strip()
-    specialist_log("llm.request.succeeded", replyChars=len(reply))
+    specialist_log("llm.request.succeeded", replyChars=len(reply), durationMs=round((time.perf_counter() - started) * 1000))
     return reply
 
 
@@ -887,8 +897,9 @@ def openai_transcribe_audio(audio: bytes, audio_format: str) -> str:
 
     from openai import OpenAI
 
+    started = time.perf_counter()
     specialist_log("stt.request.started", provider="openai", audioBytes=len(audio), audioFormat=audio_format)
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=float(os.getenv("SOVA_OPENAI_TIMEOUT_SECONDS", "8")))
     audio_file = io.BytesIO(audio)
     audio_file.name = f"audio.{audio_format}"
     result = client.audio.transcriptions.create(
@@ -896,7 +907,7 @@ def openai_transcribe_audio(audio: bytes, audio_format: str) -> str:
         file=audio_file,
     )
     text = (getattr(result, "text", "") or "").strip()
-    specialist_log("stt.request.succeeded", provider="openai", textChars=len(text))
+    specialist_log("stt.request.succeeded", provider="openai", textChars=len(text), durationMs=round((time.perf_counter() - started) * 1000))
     return text
 
 
@@ -918,8 +929,9 @@ def openai_tts_audio(text: str) -> Optional[dict]:
 
     from openai import OpenAI
 
+    started = time.perf_counter()
     specialist_log("tts.request.started", provider="openai", textChars=len(text))
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=float(os.getenv("SOVA_OPENAI_TIMEOUT_SECONDS", "8")))
     response = client.audio.speech.create(
         model=os.getenv("SOVA_TTS_MODEL", "tts-1"),
         voice=os.getenv("SOVA_TTS_VOICE", "alloy"),
@@ -927,7 +939,7 @@ def openai_tts_audio(text: str) -> Optional[dict]:
         response_format="wav",
     )
     audio = response.read()
-    specialist_log("tts.request.succeeded", provider="openai", audioBytes=len(audio), format="wav")
+    specialist_log("tts.request.succeeded", provider="openai", audioBytes=len(audio), format="wav", durationMs=round((time.perf_counter() - started) * 1000))
     return {"audio": base64.b64encode(audio).decode("ascii"), "format": "wav"}
 
 
@@ -943,9 +955,10 @@ def maybe_tts_audio(text: str) -> Optional[dict]:
     if os.getenv("ELEVENLABS_API_KEY"):
         try:
             from claw.convo_elevenlabs import text_to_speech
+            started = time.perf_counter()
             specialist_log("tts.request.started", provider="elevenlabs", textChars=len(text))
             audio = text_to_speech(text)
-            specialist_log("tts.request.succeeded", provider="elevenlabs", audioBytes=len(audio), format="mp3")
+            specialist_log("tts.request.succeeded", provider="elevenlabs", audioBytes=len(audio), format="mp3", durationMs=round((time.perf_counter() - started) * 1000))
             return {"audio": base64.b64encode(audio).decode("ascii"), "format": "mp3"}
         except Exception as exc:
             specialist_log("tts.request.failed", provider="elevenlabs", error=str(exc))
