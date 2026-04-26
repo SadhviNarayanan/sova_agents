@@ -23,6 +23,11 @@ _DATASET = "sova"
 _PROFILE_TABLE = f"`{_PROJECT}.{_DATASET}.patientProfile`"
 _VITALS_TABLE  = f"`{_PROJECT}.{_DATASET}.vitals`"
 _COLUMN_CACHE: dict[str, dict[str, str]] = {}
+_LOCAL_CREDENTIALS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "secrets",
+    "bigquery-service-account.json",
+)
 
 _RISK_TO_SEVERITY: dict[str, int] = {
     "low":      0,
@@ -40,6 +45,9 @@ def _client() -> bigquery.Client:
     if credentials_json:
         credentials_info = json.loads(credentials_json)
         credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        return bigquery.Client(project=_PROJECT, credentials=credentials)
+    if os.path.exists(_LOCAL_CREDENTIALS_PATH):
+        credentials = service_account.Credentials.from_service_account_file(_LOCAL_CREDENTIALS_PATH)
         return bigquery.Client(project=_PROJECT, credentials=credentials)
     return bigquery.Client(project=_PROJECT)
 

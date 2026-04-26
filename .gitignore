@@ -1,6 +1,9 @@
 # Secrets — never commit these
 claw/config.json
 claw/telegram_config.json
+secrets/
+*service-account*.json
+automaticbalancetransfer-*.json
 
 .env
 .env.*
