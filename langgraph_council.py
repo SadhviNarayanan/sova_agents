@@ -7,12 +7,32 @@ who speaks next. Convergence pressure increases as the debate progresses.
 from typing import Dict, List, Any, TypedDict, Optional
 from datetime import datetime
 import os
+import re
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
 import json
 import requests as http_requests
+
+
+def _make_llm(temperature: float = 0.7, max_tokens: int = 100) -> ChatOpenAI:
+    """Use K2-Think-v2 when K2_API_KEY is set, otherwise fall back to GPT-4o-mini."""
+    k2_key = os.environ.get("K2_API_KEY")
+    if k2_key:
+        return ChatOpenAI(
+            model="MBZUAI-IFM/K2-Think-v2",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            openai_api_key=k2_key,
+            openai_api_base="https://api.k2think.ai/v1",
+        )
+    return ChatOpenAI(model="gpt-4o-mini", temperature=temperature, max_tokens=max_tokens)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks emitted by K2-Think-v2."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 class CouncilState(TypedDict):
@@ -32,7 +52,7 @@ class MedicalAgent:
         self.name = name
         self.specialty = specialty
         self.system_prompt = system_prompt
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_tokens=100)
+        self.llm = _make_llm(temperature=0.7, max_tokens=100)
 
     def speak(self, context: Dict[str, Any], convergence_pressure: float) -> Dict[str, Any]:
         self.llm.max_tokens = 100
@@ -59,7 +79,7 @@ class MedicalAgent:
         ]
 
         response = self.llm.invoke(messages)
-        statement = response.content.strip()
+        statement = _strip_thinking(response.content)
 
         print(f"\n{self.name} ({self.specialty}): {statement}\n", flush=True)
 
@@ -286,7 +306,7 @@ class LangGraphMedicalCouncil:
             ))
         ]
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        llm = _make_llm(temperature=0, max_tokens=200)
         try:
             result = (llm | JsonOutputParser()).invoke(messages)
             relevant = [k for k in result.get("relevant", valid_keys) if k in valid_keys]
@@ -340,7 +360,7 @@ class LangGraphMedicalCouncil:
             ))
         ]
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        llm = _make_llm(temperature=0, max_tokens=50)
         try:
             result = (llm | JsonOutputParser()).invoke(messages)
             next_agent = result.get("next", "")
@@ -471,7 +491,7 @@ class LangGraphMedicalCouncil:
             ))
         ]
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, max_tokens=400)
+        llm = _make_llm(temperature=0.3, max_tokens=600)
         result = (llm | JsonOutputParser()).invoke(messages)
 
         valid_actions = {"Call 911", "Call caregiver", "Text caregiver", "Initiate conversation with patient", "Sleep"}

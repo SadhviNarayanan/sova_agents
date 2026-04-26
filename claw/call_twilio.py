@@ -1,13 +1,11 @@
 """
 call_twilio.py — outbound call and alert dispatch for CareRelay anomalies.
 
-  call_911          — places an outbound Twilio call to 911 with patient vitals + address
-  call_caregiver    — places an outbound Twilio call to the caregiver with patient conditions
-  text_caregiver    — sends a Telegram message to the caregiver chat with patient conditions
+  call_911       — outbound Twilio call to 911 with patient name, address, conditions
+  call_caregiver — outbound Twilio call to caregiver with vitals + conditions
+  text_caregiver — Telegram message to caregiver chat
 
-All patient and credential config is read from config.json in this directory.
-Each function accepts the WHOOP data dict from synthetic_data / db so it can
-include live vitals in the alert.
+No webhook server or ngrok needed — TwiML is passed directly to Twilio.
 """
 from __future__ import annotations
 
@@ -17,11 +15,8 @@ import urllib.request
 from pathlib import Path
 
 from twilio.rest import Client
+from twilio.twiml.voice_response import VoiceResponse
 
-
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
 
 def _load_config() -> dict:
     path = Path(__file__).parent / "config.json"
@@ -40,9 +35,21 @@ def _from_number(cfg: dict) -> str:
     return cfg["twilio"]["phone_number"]
 
 
-# ---------------------------------------------------------------------------
-# Telegram helper (replicates send_message from tg.py without importing it)
-# ---------------------------------------------------------------------------
+def _urgency_word(data: dict) -> str:
+    try:
+        score = int(data.get("recovery_score", 0))
+        return "high" if score < 40 else "medium" if score < 65 else "low"
+    except (TypeError, ValueError):
+        return "high"
+
+
+def _urgency_emoji(data: dict) -> str:
+    try:
+        score = int(data.get("recovery_score", 0))
+        return "🔴 HIGH" if score < 40 else "🟡 MEDIUM" if score < 65 else "🟢 LOW"
+    except (TypeError, ValueError):
+        return "🔴 HIGH"
+
 
 def _telegram_send(bot_token: str, chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -53,18 +60,67 @@ def _telegram_send(bot_token: str, chat_id: str, text: str) -> None:
         resp.read()
 
 
-def _urgency(data: dict) -> str:
-    try:
-        score = int(data.get("recovery_score", 0))
-        return "🔴 HIGH" if score < 40 else "🟡 MEDIUM" if score < 65 else "🟢 LOW"
-    except (TypeError, ValueError):
-        return "🔴 HIGH"
+def call_911(data: dict | None = None) -> None:
+    data = data or {}
+    cfg = _load_config()
+    patient = cfg["patient"]
+    client = _twilio_client(cfg)
+
+    script = (
+        f"Emergency medical alert. "
+        f"Patient name: {patient['name']}. "
+        f"Address: {patient['address']}. "
+        f"Known conditions: {', '.join(patient['conditions'])}. "
+        f"This is an automated CareRelay emergency alert. Please dispatch immediately."
+    )
+    resp = VoiceResponse()
+    resp.say(script)
+
+    print(f"⚠  EMERGENCY — calling 911 for {patient['name']}...")
+    call = client.calls.create(
+        from_=_from_number(cfg),
+        to="+19112",
+        twiml=str(resp),
+    )
+    print(f"   911 call SID: {call.sid}")
 
 
-def _caregiver_telegram_text(patient: dict, data: dict) -> str:
-    return (
+def call_caregiver(data: dict | None = None) -> None:
+    data = data or {}
+    cfg = _load_config()
+    patient = cfg["patient"]
+    client = _twilio_client(cfg)
+
+    script = (
+        f"Hello {patient['caregiver_name']}, this is CareRelay calling about {patient['name']}. "
+        f"An anomaly has been detected. Urgency level: {_urgency_word(data)}. "
+        f"Current vitals: recovery score {data.get('recovery_score', 'unavailable')} out of 100, "
+        f"HRV {data.get('hrv', 'unavailable')} milliseconds, "
+        f"resting heart rate {data.get('resting_heart_rate', 'unavailable')} beats per minute. "
+        f"Known conditions: {', '.join(patient['conditions'])}. "
+        f"Please follow up with the patient immediately."
+    )
+    resp = VoiceResponse()
+    resp.say(script)
+
+    print(f"⚠  Calling caregiver {patient['caregiver_name']} for {patient['name']}...")
+    call = client.calls.create(
+        from_=_from_number(cfg),
+        to=patient["caregiver_phone"],
+        twiml=str(resp),
+    )
+    print(f"   Caregiver call SID: {call.sid}")
+
+
+def text_caregiver(data: dict | None = None) -> None:
+    data = data or {}
+    cfg = _load_config()
+    patient = cfg["patient"]
+    tg = cfg["telegram"]
+
+    text = (
         f"<b>CareRelay Alert — {patient['name']}</b>\n\n"
-        f"<b>Urgency:</b> {_urgency(data)}\n\n"
+        f"<b>Urgency:</b> {_urgency_emoji(data)}\n\n"
         f"<b>Issue:</b> Anomaly detected in live vitals — immediate review needed.\n\n"
         f"<b>Conditions:</b> {', '.join(patient['conditions'])}\n\n"
         f"<b>Live Vitals:</b>\n"
@@ -74,113 +130,23 @@ def _caregiver_telegram_text(patient: dict, data: dict) -> str:
         f"Please follow up with the patient immediately."
     )
 
-
-# ---------------------------------------------------------------------------
-# Public functions — called by heartbeat.py
-# ---------------------------------------------------------------------------
-
-def _webhook_url(cfg: dict) -> str:
-    url = cfg.get("backend", {}).get("webhook_url", "").rstrip("/")
-    if not url:
-        raise EnvironmentError("backend.webhook_url not set in config.json — run ngrok and add the URL.")
-    return url
-
-
-def call_911(data: dict | None = None) -> None:
-    from call_server import register_call_data
-    data = data or {}
-    cfg = _load_config()
-    patient = cfg["patient"]
-    client = _twilio_client(cfg)
-    base = _webhook_url(cfg)
-
-    print(f"⚠  EMERGENCY — calling 911 for {patient['name']}...")
-    call = client.calls.create(
-        from_=_from_number(cfg),
-        to="+19112",  # replace with real PSAP number for prod
-        url=f"{base}/call/911/start",
-        method="POST",
-    )
-    register_call_data(call.sid, data)
-    print(f"   911 call SID: {call.sid}")
-
-
-def call_caregiver(data: dict | None = None) -> None:
-    from call_server import register_call_data
-    data = data or {}
-    cfg = _load_config()
-    patient = cfg["patient"]
-    client = _twilio_client(cfg)
-    base = _webhook_url(cfg)
-
-    print(f"⚠  Calling caregiver {patient['caregiver_name']} for {patient['name']}...")
-    call = client.calls.create(
-        from_=_from_number(cfg),
-        to=patient["caregiver_phone"],
-        url=f"{base}/call/caregiver/start",
-        method="POST",
-    )
-    register_call_data(call.sid, data)
-    print(f"   Caregiver call SID: {call.sid}")
-
-
-def call_patient_elevenlabs(data: dict | None = None) -> None:
-    from call_server import register_call_data
-    data = data or {}
-    cfg = _load_config()
-    patient = cfg["patient"]
-    client = _twilio_client(cfg)
-    base = _webhook_url(cfg)
-
-    patient_phone = patient.get("patient_phone", "")
-    if not patient_phone:
-        print("⚠  patient_phone not set in config.json — skipping ElevenLabs call.")
-        return
-
-    agent_id = cfg.get("elevenlabs", {}).get("agent_id", "")
-    if not agent_id:
-        print("⚠  elevenlabs.agent_id not set in config.json — skipping ElevenLabs call.")
-        return
-
-    print(f"📞  Initiating ElevenLabs check-in call to {patient['name']}...")
-    call = client.calls.create(
-        from_=_from_number(cfg),
-        to=patient_phone,
-        url=f"{base}/call/elevenlabs/patient/start",
-        method="POST",
-    )
-    register_call_data(call.sid, data)
-    print(f"   ElevenLabs call SID: {call.sid}")
-
-
-def text_caregiver(data: dict | None = None) -> None:
-    data = data or {}
-    cfg = _load_config()
-    patient = cfg["patient"]
-    tg = cfg["telegram"]
-
     print(f"⚠  Sending Telegram alert to caregiver for {patient['name']}...")
-    _telegram_send(tg["bot_token"], tg["chat_id"], _caregiver_telegram_text(patient, data))
+    _telegram_send(tg["bot_token"], tg["chat_id"], text)
     print("   Telegram alert sent.")
 
-
-# ---------------------------------------------------------------------------
-# Manual test
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import sys
     from synthetic_data import get_data
 
-    commands = {"911": call_911, "caregiver": call_caregiver, "text": text_caregiver, "elevenlabs": call_patient_elevenlabs}
+    commands = {"911": call_911, "caregiver": call_caregiver, "text": text_caregiver}
     data = get_data()
 
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
-        print("Usage: python call_twilio.py [911 | caregiver | text | elevenlabs]")
-        print("  911        — outbound Twilio call to 911 with name, address, conditions")
-        print("  caregiver  — outbound Twilio call to caregiver with vitals + conditions")
-        print("  text       — Telegram message to caregiver chat")
-        print("  elevenlabs — outbound ElevenLabs AI check-in call to patient")
+        print("Usage: python call_twilio.py [911 | caregiver | text]")
+        print("  911       — outbound call to 911 with name, address, conditions")
+        print("  caregiver — outbound call to caregiver with vitals + conditions")
+        print("  text      — Telegram message to caregiver")
         sys.exit(1)
 
     fn = commands[sys.argv[1]]
