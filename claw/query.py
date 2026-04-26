@@ -146,7 +146,7 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
     Returns the number of rows corrected.
     """
     client = _client()
-    patient_col = _column_for("vitals", "patientId", "PatientId", "PatientID", "patientID")
+    patient_col = _column_for("vitals", "patientId", "PatientId", "PatientID", "patientID", "user_id")
     timestamp_col = _column_for("vitals", "TimeStamp", "Timestamp", "timestamp")
 
     rows = list(client.query(f"""
@@ -244,7 +244,7 @@ def insert_vitals() -> None:
 
 def get_latest_vitals(patient_id: str) -> dict:
     """Fetch the most-recent vitals row for a patient."""
-    patient_col = _column_for("vitals", "patientId", "PatientId", "PatientID", "patientID")
+    patient_col = _column_for("vitals", "patientId", "PatientId", "PatientID", "patientID", "user_id")
     timestamp_col = _column_for("vitals", "TimeStamp", "Timestamp", "timestamp")
     rows = list(_client().query(f"""
         SELECT *
