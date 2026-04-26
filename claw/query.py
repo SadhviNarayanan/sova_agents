@@ -194,16 +194,16 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
 
 
 def insert_vitals() -> None:
-    """Seed patientProfile + vitals for the demo patient."""
+    """Seed patientProfile + vitals for James Hartley (JH-001)."""
     client = _client()
 
     profile = {
-        "patientId": "startID",
-        "Age": 68, "Gender": "Female",
-        "Surgery": "Post-cardiac event", "DischargeDate": "2026-04-10",
+        "patientId": "JH-001",
+        "Age": 68, "Gender": "Male",
+        "Surgery": "Post-MI cardiac event", "DischargeDate": "2026-04-10",
         "RiskLevel": "high", "BloodPressure": "138/86", "HeartRate": 74,
-        "Allergies": "None", "CurrentMedications": "Metoprolol, Aspirin",
-        "EmergencyContactName": "Family Contact", "EmergencyContactPhone": "+15125550101",
+        "Allergies": "None", "CurrentMedications": "Metoprolol, Aspirin, Lisinopril, Metformin",
+        "EmergencyContactName": "Linda Hartley", "EmergencyContactPhone": "+18053587102",
     }
 
     try:
@@ -226,12 +226,15 @@ def insert_vitals() -> None:
 
     now = datetime.now()
     # (offset_seconds, heart_rate, blood_pressure, temperature)
-    # historical rows near rhr_baseline=74; final row is current abnormal
+    # baseline readings → gradual elevation → abnormal spike
     vitals_rows = [
-        (0,  73, "136/84", 37.1),
-        (10, 75, "137/85", 37.0),
-        (20, 74, "138/86", 37.0),
-        (30, 99, "148/94", 38.4),
+        (-60, 72, "136/84", 37.0),
+        (-50, 74, "137/85", 37.0),
+        (-40, 73, "138/86", 37.1),
+        (-30, 75, "139/85", 37.1),
+        (-20, 76, "140/87", 37.2),
+        (-10, 80, "143/89", 37.3),
+        (  0, 99, "158/96", 38.5),  # anomalous — triggers alert
     ]
 
     pid = profile["patientId"]
@@ -246,7 +249,7 @@ def insert_vitals() -> None:
                   {heart_rate}, '{blood_pressure}', {temperature}
                 )
             """).result()
-            print(f"Inserted vitals for {pid} at {ts}")
+            print(f"Inserted vitals for {pid} at +{offset_seconds}s  HR={heart_rate}  BP={blood_pressure}")
         except Exception as e:
             print(f"Error inserting vitals for {pid} at {ts}: {e}")
 

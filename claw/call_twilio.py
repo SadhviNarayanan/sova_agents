@@ -53,15 +53,24 @@ def _telegram_send(bot_token: str, chat_id: str, text: str) -> None:
         resp.read()
 
 
+def _urgency(data: dict) -> str:
+    try:
+        score = int(data.get("recovery_score", 0))
+        return "🔴 HIGH" if score < 40 else "🟡 MEDIUM" if score < 65 else "🟢 LOW"
+    except (TypeError, ValueError):
+        return "🔴 HIGH"
+
+
 def _caregiver_telegram_text(patient: dict, data: dict) -> str:
     return (
         f"<b>CareRelay Alert — {patient['name']}</b>\n\n"
-        f"An anomaly has been detected. Caregiver review needed.\n\n"
-        f"<b>Conditions:</b> {', '.join(patient['conditions'])}\n"
+        f"<b>Urgency:</b> {_urgency(data)}\n\n"
+        f"<b>Issue:</b> Anomaly detected in live vitals — immediate review needed.\n\n"
+        f"<b>Conditions:</b> {', '.join(patient['conditions'])}\n\n"
         f"<b>Live Vitals:</b>\n"
         f"  • Recovery score: {data.get('recovery_score', 'N/A')} / 100\n"
         f"  • HRV: {data.get('hrv', 'N/A')} ms\n"
-        f"  • Resting heart rate: {data.get('resting_heart_rate', 'N/A')} bpm\n"
+        f"  • Resting heart rate: {data.get('resting_heart_rate', 'N/A')} bpm\n\n"
         f"Please follow up with the patient immediately."
     )
 
@@ -115,6 +124,35 @@ def call_caregiver(data: dict | None = None) -> None:
     print(f"   Caregiver call SID: {call.sid}")
 
 
+def call_patient_elevenlabs(data: dict | None = None) -> None:
+    from call_server import register_call_data
+    data = data or {}
+    cfg = _load_config()
+    patient = cfg["patient"]
+    client = _twilio_client(cfg)
+    base = _webhook_url(cfg)
+
+    patient_phone = patient.get("patient_phone", "")
+    if not patient_phone:
+        print("⚠  patient_phone not set in config.json — skipping ElevenLabs call.")
+        return
+
+    agent_id = cfg.get("elevenlabs", {}).get("agent_id", "")
+    if not agent_id:
+        print("⚠  elevenlabs.agent_id not set in config.json — skipping ElevenLabs call.")
+        return
+
+    print(f"📞  Initiating ElevenLabs check-in call to {patient['name']}...")
+    call = client.calls.create(
+        from_=_from_number(cfg),
+        to=patient_phone,
+        url=f"{base}/call/elevenlabs/patient/start",
+        method="POST",
+    )
+    register_call_data(call.sid, data)
+    print(f"   ElevenLabs call SID: {call.sid}")
+
+
 def text_caregiver(data: dict | None = None) -> None:
     data = data or {}
     cfg = _load_config()
@@ -134,14 +172,15 @@ if __name__ == "__main__":
     import sys
     from synthetic_data import get_data
 
-    commands = {"911": call_911, "caregiver": call_caregiver, "text": text_caregiver}
+    commands = {"911": call_911, "caregiver": call_caregiver, "text": text_caregiver, "elevenlabs": call_patient_elevenlabs}
     data = get_data()
 
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
-        print("Usage: python call_twilio.py [911 | caregiver | text]")
-        print("  911        — outbound Twilio call to 911 with vitals + address")
-        print("  caregiver  — outbound Twilio call to caregiver with conditions")
+        print("Usage: python call_twilio.py [911 | caregiver | text | elevenlabs]")
+        print("  911        — outbound Twilio call to 911 with name, address, conditions")
+        print("  caregiver  — outbound Twilio call to caregiver with vitals + conditions")
         print("  text       — Telegram message to caregiver chat")
+        print("  elevenlabs — outbound ElevenLabs AI check-in call to patient")
         sys.exit(1)
 
     fn = commands[sys.argv[1]]

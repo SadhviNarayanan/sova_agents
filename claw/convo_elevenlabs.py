@@ -11,6 +11,7 @@ import asyncio
 import io
 import json
 import os
+import urllib.request
 
 from dotenv import load_dotenv
 from elevenlabs.client import ElevenLabs
@@ -142,6 +143,17 @@ async def realtime_agent(get_reply, chunk_ms: int = 250) -> None:
 
 
 # ── Quick demo ────────────────────────────────────────────────────────────────
+
+
+def get_signed_url(agent_id: str, api_key: str | None = None) -> str:
+    """Fetch a time-limited signed WebSocket URL for an ElevenLabs Conversational AI agent."""
+    key = api_key or os.getenv("ELEVENLABS_API_KEY")
+    if not key:
+        raise EnvironmentError("ELEVENLABS_API_KEY is not set")
+    url = f"https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id={agent_id}"
+    req = urllib.request.Request(url, headers={"xi-api-key": key})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())["signed_url"]
 
 
 def patient_convo():
