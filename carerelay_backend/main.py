@@ -1002,7 +1002,73 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
     specialist = session["specialist"]
     status = PatientStatusResponse(**session["status"])
     greeting = specialist_greeting(status, specialist)
+    send_lock = asyncio.Lock()
+    session["reply_generation"] = 0
+    reply_task: Optional[asyncio.Task] = None
     specialist_log("websocket.accepted", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
+
+    async def send_event(payload: dict):
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    async def generate_and_send_reply(generation: int, user_text: str):
+        try:
+            reply_payload = await asyncio.to_thread(specialist_reply_payload, session, user_text)
+        except asyncio.CancelledError:
+            specialist_log(
+                "reply.pipeline.cancelled",
+                patientId=patient_id,
+                specialistId=specialist["id"],
+                sessionId=session_id,
+                generation=generation,
+            )
+            raise
+        except Exception as exc:
+            specialist_log("reply.pipeline.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, generation=generation, error=str(exc))
+            await send_event({
+                "type": "session.error",
+                "sessionId": session_id,
+                "message": "One moment.",
+            })
+            return
+
+        if generation != session.get("reply_generation"):
+            specialist_log(
+                "reply.pipeline.discarded_stale",
+                patientId=patient_id,
+                specialistId=specialist["id"],
+                sessionId=session_id,
+                generation=generation,
+                currentGeneration=session.get("reply_generation"),
+            )
+            return
+
+        specialist_log(
+            "agent.reply.text.ready",
+            patientId=patient_id,
+            specialistId=specialist["id"],
+            sessionId=session_id,
+            generation=generation,
+            textChars=len(reply_payload["text"]),
+            textPreview=log_preview(reply_payload["text"]),
+        )
+        audio = reply_payload["audio"]
+        await send_event({
+            "type": "agent.audio",
+            "sessionId": session_id,
+            "turnId": f"reply-{generation}",
+            "format": reply_payload.get("format") or "mp3",
+            "audioBase64": audio,
+        })
+        specialist_log(
+            "agent.audio.sent",
+            patientId=patient_id,
+            specialistId=specialist["id"],
+            sessionId=session_id,
+            generation=generation,
+            format=reply_payload.get("format") or "mp3",
+            base64Chars=len(audio),
+        )
 
     await websocket.send_json({
         "type": "session.started",
@@ -1059,9 +1125,24 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
             payload = json.loads(raw)
             event_type = payload.get("type")
             if event_type == "session.end":
+                if reply_task and not reply_task.done():
+                    reply_task.cancel()
                 await websocket.send_json({"type": "session.ended", "sessionId": session_id})
                 await websocket.close()
                 return
+            if event_type == "audio.speech_start":
+                session["reply_generation"] = session.get("reply_generation", 0) + 1
+                if reply_task and not reply_task.done():
+                    reply_task.cancel()
+                specialist_log(
+                    "audio.speech_start.received",
+                    patientId=patient_id,
+                    specialistId=specialist["id"],
+                    sessionId=session_id,
+                    generation=session["reply_generation"],
+                    turnId=payload.get("turnId"),
+                )
+                continue
             if event_type == "audio.chunk":
                 chunk = payload.get("audioBase64")
                 if chunk:
@@ -1137,43 +1218,24 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     textChars=len(user_text),
                     textPreview=log_preview(user_text),
                 )
-                try:
-                    reply_payload = specialist_reply_payload(session, user_text)
-                except Exception as exc:
-                    specialist_log("reply.pipeline.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
-                    await websocket.send_json({
-                        "type": "session.error",
-                        "sessionId": session_id,
-                        "message": "One moment.",
-                    })
-                    continue
                 specialist_log(
-                    "agent.reply.text.ready",
+                    "reply.pipeline.started",
                     patientId=patient_id,
                     specialistId=specialist["id"],
                     sessionId=session_id,
-                    textChars=len(reply_payload["text"]),
-                    textPreview=log_preview(reply_payload["text"]),
+                    generation=session.get("reply_generation", 0),
                 )
-                audio = reply_payload["audio"]
-                await websocket.send_json({
-                    "type": "agent.audio",
-                    "sessionId": session_id,
-                    "format": reply_payload.get("format") or "mp3",
-                    "audioBase64": audio,
-                })
-                specialist_log(
-                    "agent.audio.sent",
-                    patientId=patient_id,
-                    specialistId=specialist["id"],
-                    sessionId=session_id,
-                    format=reply_payload.get("format") or "mp3",
-                    base64Chars=len(audio),
+                reply_task = asyncio.create_task(
+                    generate_and_send_reply(session.get("reply_generation", 0), user_text)
                 )
     except WebSocketDisconnect:
+        if reply_task and not reply_task.done():
+            reply_task.cancel()
         specialist_log("websocket.disconnected", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
         return
     except Exception as exc:
+        if reply_task and not reply_task.done():
+            reply_task.cancel()
         specialist_log("websocket.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
         try:
             await websocket.send_json({
