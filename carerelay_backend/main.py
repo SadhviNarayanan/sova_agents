@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import json
+import math
 import os
 import sys
 import asyncio
@@ -138,6 +139,7 @@ high_risk_episodes: Dict[str, dict] = {}
 high_risk_lock = threading.Lock()
 HIGH_RISK_COOLDOWN = timedelta(minutes=15)
 executor = ThreadPoolExecutor()
+USE_BIGQUERY_VITALS = os.getenv("SOVA_USE_BIGQUERY_VITALS", "false").lower() in {"1", "true", "yes"}
 
 @app.get("/")
 async def root():
@@ -232,6 +234,43 @@ def _value(raw: dict, *keys: str):
         if key in raw and raw[key] is not None:
             return raw[key]
     return None
+
+
+def simulated_vitals_row(patient_id: str) -> dict:
+    """
+    Deterministic live demo vitals.
+    This keeps the KMP dashboard useful even when BigQuery/Render credentials are unavailable.
+    Set SOVA_USE_BIGQUERY_VITALS=true to use database reads again.
+    """
+    now = datetime.now(timezone.utc)
+    seed = sum(ord(ch) for ch in patient_id)
+    t = now.timestamp() / 5.0
+    wave = math.sin(t + seed)
+    slow_wave = math.sin((t / 3.0) + seed)
+    oxygen_wave = math.sin((t / 2.0) + seed)
+
+    heart_rate = round(78 + wave * 7 + ((seed % 5) - 2))
+    hrv = round(58 + slow_wave * 8)
+    spo2 = round(97 + max(-2, min(1, oxygen_wave)))
+    sleep_hours = round(7.1 + slow_wave * 0.6, 1)
+    systolic = round(118 + wave * 7)
+    diastolic = round(76 + slow_wave * 4)
+    temperature = round(98.5 + slow_wave * 0.4, 1)
+
+    return {
+        "user_id": patient_id,
+        "TimeStamp": now.isoformat(),
+        "resting_heart_rate": heart_rate,
+        "rhr_baseline": 76,
+        "hrv": hrv,
+        "hrv_baseline": 60,
+        "spo2": spo2,
+        "sleep_hours": sleep_hours,
+        "sleep_performance": round(88 + slow_wave * 4),
+        "BloodPressure": f"{systolic}/{diastolic}",
+        "Temperature": temperature,
+        "simulated": True,
+    }
 
 
 def status_vitals_from_row(patient_id: str, raw: dict) -> StatusVitals:
@@ -452,21 +491,22 @@ def trigger_high_risk_once(patient_id: str, request: AnalyzeRequest, raw_vitals:
 
 @app.get("/v1/patients/{patient_id}/status", response_model=PatientStatusResponse)
 async def patient_status(patient_id: str):
-    try:
-        raw_vitals = get_latest_vitals(patient_id)
-    except Exception as exc:
-        print(f"Unable to read latest vitals from BigQuery for patientId={patient_id}: {exc}")
-        raise HTTPException(status_code=503, detail="Unable to read latest vitals")
+    raw_vitals = {}
+    profile = {}
+
+    if USE_BIGQUERY_VITALS:
+        try:
+            raw_vitals = get_latest_vitals(patient_id)
+        except Exception as exc:
+            print(f"Unable to read latest vitals from BigQuery for patientId={patient_id}; using simulated vitals. {exc}")
+
+        try:
+            profile = get_patient_profile(patient_id)
+        except Exception as exc:
+            print(f"Unable to read patient profile from BigQuery for patientId={patient_id}: {exc}")
 
     if not raw_vitals:
-        print(f"No vitals row found in BigQuery for patientId={patient_id}")
-        raise HTTPException(status_code=404, detail="No vitals found for patient")
-
-    try:
-        profile = get_patient_profile(patient_id)
-    except Exception as exc:
-        print(f"Unable to read patient profile from BigQuery for patientId={patient_id}: {exc}")
-        profile = {}
+        raw_vitals = simulated_vitals_row(patient_id)
 
     vitals = status_vitals_from_row(patient_id, raw_vitals)
     anomaly_level = infer_patient_anomaly(patient_id, raw_vitals, vitals)
