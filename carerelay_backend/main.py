@@ -95,6 +95,14 @@ class PatientStatusResponse(BaseModel):
     escalation: StatusEscalation
     deliberation: StatusDeliberation
 
+class SimulationModeRequest(BaseModel):
+    mode: str
+
+class SimulationModeResponse(BaseModel):
+    patientId: str
+    mode: str
+    statusUrl: str
+
 class AnalyzeRequest(BaseModel):
     # Patient profile
     patientId: str
@@ -136,6 +144,7 @@ debate_histories: Dict[str, List[dict]] = {}
 debate_subscribers: Dict[str, List[asyncio.Queue]] = {}
 debate_status: Dict[str, str] = {}
 high_risk_episodes: Dict[str, dict] = {}
+simulation_modes: Dict[str, str] = {}
 high_risk_lock = threading.Lock()
 HIGH_RISK_COOLDOWN = timedelta(minutes=15)
 executor = ThreadPoolExecutor()
@@ -155,6 +164,16 @@ STAGE_LABELS = {
     5: "month 2+ post-discharge",
 }
 ANOMALY_LABELS = {0: "normal", 1: "mild", 2: "moderate", 3: "significant", 4: "critical"}
+SIMULATION_MODE_ALIASES = {
+    "ok": "low",
+    "normal": "low",
+    "low": "low",
+    "med": "medium",
+    "medium": "medium",
+    "moderate": "medium",
+    "high": "high",
+    "critical": "high",
+}
 
 def build_patient_dict(request: AnalyzeRequest) -> dict:
     days_since_discharge = (date.today() - request.DischargeDate).days if request.DischargeDate else None
@@ -236,7 +255,14 @@ def _value(raw: dict, *keys: str):
     return None
 
 
-def simulated_vitals_row(patient_id: str) -> dict:
+def normalized_simulation_mode(mode: str) -> str:
+    normalized = SIMULATION_MODE_ALIASES.get(mode.strip().lower())
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Mode must be one of: low, med, medium, high")
+    return normalized
+
+
+def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
     """
     Deterministic live demo vitals.
     This keeps the KMP dashboard useful even when BigQuery/Render credentials are unavailable.
@@ -249,13 +275,30 @@ def simulated_vitals_row(patient_id: str) -> dict:
     slow_wave = math.sin((t / 3.0) + seed)
     oxygen_wave = math.sin((t / 2.0) + seed)
 
-    heart_rate = round(78 + wave * 7 + ((seed % 5) - 2))
-    hrv = round(58 + slow_wave * 8)
-    spo2 = round(97 + max(-2, min(1, oxygen_wave)))
-    sleep_hours = round(7.1 + slow_wave * 0.6, 1)
-    systolic = round(118 + wave * 7)
-    diastolic = round(76 + slow_wave * 4)
-    temperature = round(98.5 + slow_wave * 0.4, 1)
+    if mode == "high":
+        heart_rate = round(126 + wave * 6)
+        hrv = round(25 + slow_wave * 4)
+        spo2 = round(88 + oxygen_wave)
+        sleep_hours = round(4.3 + slow_wave * 0.3, 1)
+        systolic = round(164 + wave * 8)
+        diastolic = round(102 + slow_wave * 5)
+        temperature = round(102.1 + slow_wave * 0.4, 1)
+    elif mode == "medium":
+        heart_rate = round(106 + wave * 4)
+        hrv = round(42 + slow_wave * 4)
+        spo2 = round(94 + max(-1, min(1, oxygen_wave)))
+        sleep_hours = round(5.8 + slow_wave * 0.4, 1)
+        systolic = round(142 + wave * 6)
+        diastolic = round(90 + slow_wave * 4)
+        temperature = round(100.5 + slow_wave * 0.2, 1)
+    else:
+        heart_rate = round(76 + wave * 5 + ((seed % 5) - 2))
+        hrv = round(60 + slow_wave * 6)
+        spo2 = round(98 + max(-1, min(1, oxygen_wave)))
+        sleep_hours = round(7.3 + slow_wave * 0.4, 1)
+        systolic = round(118 + wave * 5)
+        diastolic = round(76 + slow_wave * 3)
+        temperature = round(98.5 + slow_wave * 0.2, 1)
 
     return {
         "user_id": patient_id,
@@ -269,6 +312,7 @@ def simulated_vitals_row(patient_id: str) -> dict:
         "sleep_performance": round(88 + slow_wave * 4),
         "BloodPressure": f"{systolic}/{diastolic}",
         "Temperature": temperature,
+        "simulation_mode": mode,
         "simulated": True,
     }
 
@@ -489,6 +533,20 @@ def trigger_high_risk_once(patient_id: str, request: AnalyzeRequest, raw_vitals:
     )
 
 
+@app.post("/v1/patients/{patient_id}/simulation", response_model=SimulationModeResponse)
+async def set_patient_simulation(patient_id: str, request: SimulationModeRequest):
+    mode = normalized_simulation_mode(request.mode)
+    simulation_modes[patient_id] = mode
+    if mode != "high":
+        with high_risk_lock:
+            high_risk_episodes.pop(patient_id, None)
+    return SimulationModeResponse(
+        patientId=patient_id,
+        mode=mode,
+        statusUrl=f"/v1/patients/{patient_id}/status",
+    )
+
+
 @app.get("/v1/patients/{patient_id}/status", response_model=PatientStatusResponse)
 async def patient_status(patient_id: str):
     raw_vitals = {}
@@ -506,7 +564,8 @@ async def patient_status(patient_id: str):
             print(f"Unable to read patient profile from BigQuery for patientId={patient_id}: {exc}")
 
     if not raw_vitals:
-        raw_vitals = simulated_vitals_row(patient_id)
+        mode = simulation_modes.get(patient_id, "low")
+        raw_vitals = simulated_vitals_row(patient_id, mode)
 
     vitals = status_vitals_from_row(patient_id, raw_vitals)
     anomaly_level = infer_patient_anomaly(patient_id, raw_vitals, vitals)
