@@ -86,6 +86,12 @@ class StatusDeliberation(BaseModel):
     status: str = "idle"
     streamUrl: Optional[str] = None
 
+class StatusTrajectoryPoint(BaseModel):
+    label: str
+    hoursFromNow: float
+    riskLevel: str
+    riskScore: int
+
 class PatientStatusResponse(BaseModel):
     patientId: str
     vitals: StatusVitals
@@ -94,6 +100,7 @@ class PatientStatusResponse(BaseModel):
     recommendedAction: str
     escalation: StatusEscalation
     deliberation: StatusDeliberation
+    trajectory: List[StatusTrajectoryPoint] = []
 
 class SimulationModeRequest(BaseModel):
     mode: str
@@ -315,6 +322,43 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         "simulation_mode": mode,
         "simulated": True,
     }
+
+
+def simulated_trajectory(mode: str, wave_seed: str) -> List[StatusTrajectoryPoint]:
+    now = datetime.now(timezone.utc)
+    seed = sum(ord(ch) for ch in wave_seed)
+    drift = math.sin((now.timestamp() / 12.0) + seed)
+
+    if mode == "high":
+        points = [
+            ("Now", 0.0, "high", 84 + round(drift * 3)),
+            ("30m", 0.5, "high", 88 + round(drift * 2)),
+            ("2h", 2.0, "high", 91 + round(drift * 2)),
+            ("6h", 6.0, "high", 94 + round(drift * 2)),
+        ]
+    elif mode == "medium":
+        points = [
+            ("Now", 0.0, "medium", 47 + round(drift * 3)),
+            ("1h", 1.0, "medium", 52 + round(drift * 2)),
+            ("2h", 2.0, "medium", 58 + round(drift * 2)),
+            ("6h", 6.0, "high", 68 + round(drift * 3)),
+        ]
+    else:
+        points = [
+            ("Now", 0.0, "low", 14 + round(drift * 2)),
+            ("2h", 2.0, "low", 12 + round(drift * 2)),
+            ("6h", 6.0, "low", 10 + round(drift * 2)),
+        ]
+
+    return [
+        StatusTrajectoryPoint(
+            label=label,
+            hoursFromNow=hours,
+            riskLevel=risk,
+            riskScore=max(0, min(100, score)),
+        )
+        for label, hours, risk, score in points
+    ]
 
 
 def status_vitals_from_row(patient_id: str, raw: dict) -> StatusVitals:
@@ -566,6 +610,8 @@ async def patient_status(patient_id: str):
     if not raw_vitals:
         mode = simulation_modes.get(patient_id, "low")
         raw_vitals = simulated_vitals_row(patient_id, mode)
+    else:
+        mode = risk_level_for_anomaly(simple_vitals_anomaly(status_vitals_from_row(patient_id, raw_vitals)))
 
     vitals = status_vitals_from_row(patient_id, raw_vitals)
     anomaly_level = infer_patient_anomaly(patient_id, raw_vitals, vitals)
@@ -588,6 +634,7 @@ async def patient_status(patient_id: str):
         recommendedAction=action,
         escalation=escalation,
         deliberation=current_deliberation(patient_id),
+        trajectory=simulated_trajectory(mode, patient_id),
     )
 
 
