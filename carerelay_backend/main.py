@@ -789,21 +789,23 @@ def call_context_summary(status: PatientStatusResponse, specialist: dict, profil
     )
 
 
-def specialist_greeting(status: PatientStatusResponse, specialist: dict) -> str:
-    if status.riskLevel == "high":
-        return (
-            f"This is {specialist['name']}. I can see Sova marked this as high risk, "
-            "so I’ll keep this focused. Tell me what you feel right now."
+def specialist_log(event: str, **metadata):
+    safe_metadata = {key: value for key, value in metadata.items() if value is not None}
+    print(
+        "SovaVoice "
+        + json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **safe_metadata,
+            },
+            default=str,
         )
-    if status.riskLevel in {"medium", "moderate"}:
-        return (
-            f"This is {specialist['name']}. I’m reviewing the signal that needs more context. "
-            "Tell me what changed or what feels confusing."
-        )
-    return (
-        f"This is {specialist['name']}. Your current signals look stable, "
-        "but I can help explain what Sova is watching."
     )
+
+
+def specialist_greeting(status: PatientStatusResponse, specialist: dict) -> str:
+    return f"Hi, I’m {specialist['name']}, how are you doing?"
 
 
 def llm_specialist_reply(context: str, user_text: str) -> str:
@@ -813,6 +815,7 @@ def llm_specialist_reply(context: str, user_text: str) -> str:
 
     from openai import OpenAI
 
+    specialist_log("llm.request.started", textChars=len(user_text))
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=os.getenv("SOVA_SPECIALIST_MODEL", "gpt-4o-mini"),
@@ -823,18 +826,85 @@ def llm_specialist_reply(context: str, user_text: str) -> str:
         max_tokens=140,
         temperature=0.3,
     )
-    return response.choices[0].message.content.strip()
+    reply = response.choices[0].message.content.strip()
+    specialist_log("llm.request.succeeded", replyChars=len(reply))
+    return reply
 
 
-def maybe_tts_audio(text: str) -> Optional[str]:
-    if not os.getenv("ELEVENLABS_API_KEY"):
+def openai_transcribe_audio(audio: bytes, audio_format: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured for speech recognition.")
+
+    from openai import OpenAI
+
+    specialist_log("stt.request.started", provider="openai", audioBytes=len(audio), audioFormat=audio_format)
+    client = OpenAI(api_key=api_key)
+    audio_file = io.BytesIO(audio)
+    audio_file.name = f"audio.{audio_format}"
+    result = client.audio.transcriptions.create(
+        model=os.getenv("SOVA_STT_MODEL", "whisper-1"),
+        file=audio_file,
+    )
+    text = (getattr(result, "text", "") or "").strip()
+    specialist_log("stt.request.succeeded", provider="openai", textChars=len(text))
+    return text
+
+
+def transcribe_audio(audio: bytes, audio_format: str) -> str:
+    provider = os.getenv("SOVA_STT_PROVIDER", "openai").strip().lower()
+    if provider == "elevenlabs":
+        from claw.convo_elevenlabs import speech_to_text
+        specialist_log("stt.request.started", provider="elevenlabs", audioBytes=len(audio), audioFormat=audio_format)
+        text = speech_to_text(audio, audio_format=audio_format).strip()
+        specialist_log("stt.request.succeeded", provider="elevenlabs", textChars=len(text))
+        return text
+    return openai_transcribe_audio(audio, audio_format)
+
+
+def openai_tts_audio(text: str) -> Optional[dict]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
         return None
+
+    from openai import OpenAI
+
+    specialist_log("tts.request.started", provider="openai", textChars=len(text))
+    client = OpenAI(api_key=api_key)
+    response = client.audio.speech.create(
+        model=os.getenv("SOVA_TTS_MODEL", "tts-1"),
+        voice=os.getenv("SOVA_TTS_VOICE", "alloy"),
+        input=text,
+        response_format="wav",
+    )
+    audio = response.read()
+    specialist_log("tts.request.succeeded", provider="openai", audioBytes=len(audio), format="wav")
+    return {"audio": base64.b64encode(audio).decode("ascii"), "format": "wav"}
+
+
+def maybe_tts_audio(text: str) -> Optional[dict]:
+    provider = os.getenv("SOVA_TTS_PROVIDER", "elevenlabs").strip().lower()
+    if provider == "openai":
+        try:
+            return openai_tts_audio(text)
+        except Exception as exc:
+            specialist_log("tts.request.failed", provider="openai", error=str(exc))
+            return None
+
+    if os.getenv("ELEVENLABS_API_KEY"):
+        try:
+            from claw.convo_elevenlabs import text_to_speech
+            specialist_log("tts.request.started", provider="elevenlabs", textChars=len(text))
+            audio = text_to_speech(text)
+            specialist_log("tts.request.succeeded", provider="elevenlabs", audioBytes=len(audio), format="mp3")
+            return {"audio": base64.b64encode(audio).decode("ascii"), "format": "mp3"}
+        except Exception as exc:
+            specialist_log("tts.request.failed", provider="elevenlabs", error=str(exc))
+
     try:
-        from claw.convo_elevenlabs import text_to_speech
-        audio = text_to_speech(text)
-        return base64.b64encode(audio).decode("ascii")
+        return openai_tts_audio(text)
     except Exception as exc:
-        print(f"Specialist call TTS failed: {exc}")
+        specialist_log("tts.request.failed", provider="openai", fallback=True, error=str(exc))
         return None
 
 
@@ -851,7 +921,7 @@ def pcm16_to_wav_bytes(pcm: bytes, sample_rate: int = 16_000) -> bytes:
 def specialist_reply_payload(session: dict, user_text: str) -> dict:
     reply = llm_specialist_reply(session["context"], user_text)
     audio = maybe_tts_audio(reply)
-    return {"text": reply, "audio": audio}
+    return {"text": reply, "audio": audio["audio"] if audio else None, "format": audio["format"] if audio else None}
 
 
 @app.post("/v1/patients/{patient_id}/specialist-calls", response_model=SpecialistCallStartResponse)
@@ -874,8 +944,17 @@ async def start_specialist_call(patient_id: str, request: SpecialistCallStartReq
         "status": status.model_dump(),
         "context": call_context_summary(status, specialist, profile),
         "audio_chunks": [],
+        "audio_chunk_count": 0,
+        "audio_byte_count": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    specialist_log(
+        "session.created",
+        patientId=patient_id,
+        specialistId=specialist["id"],
+        sessionId=session_id,
+        clientSessionId=request.clientSessionId,
+    )
     return SpecialistCallStartResponse(
         sessionId=session_id,
         websocketUrl=f"/v1/specialist-calls/{session_id}/stream",
@@ -895,6 +974,7 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
     specialist = session["specialist"]
     status = PatientStatusResponse(**session["status"])
     greeting = specialist_greeting(status, specialist)
+    specialist_log("websocket.accepted", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
 
     await websocket.send_json({
         "type": "session.started",
@@ -903,6 +983,7 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
         "specialistId": specialist["id"],
         "specialistName": specialist["name"],
     })
+    specialist_log("session.started.sent", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
     await websocket.send_json({
         "type": "agent.transcript",
         "sessionId": session_id,
@@ -910,18 +991,32 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
         "text": greeting,
         "createdAt": datetime.now(timezone.utc).isoformat(),
     })
+    specialist_log("greeting.transcript.sent", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, textChars=len(greeting))
     audio = maybe_tts_audio(greeting)
     if audio:
         await websocket.send_json({
             "type": "agent.audio",
             "sessionId": session_id,
-            "format": "mp3",
-            "audioBase64": audio,
+            "format": audio["format"],
+            "audioBase64": audio["audio"],
         })
+        specialist_log(
+            "agent.audio.sent",
+            patientId=patient_id,
+            specialistId=specialist["id"],
+            sessionId=session_id,
+            format=audio["format"],
+            base64Chars=len(audio["audio"]),
+        )
+    else:
+        specialist_log("greeting.audio.missing", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
 
     try:
         while True:
             message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                specialist_log("websocket.disconnected", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
+                return
             if "bytes" in message and message["bytes"]:
                 continue
             raw = message.get("text")
@@ -934,46 +1029,55 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                 await websocket.close()
                 return
             if event_type == "audio.chunk":
-                if not os.getenv("ELEVENLABS_API_KEY"):
-                    await websocket.send_json({
-                        "type": "session.error",
-                        "sessionId": session_id,
-                        "message": "ELEVENLABS_API_KEY is not configured for live speech recognition.",
-                    })
-                    continue
                 chunk = payload.get("audioBase64")
                 if chunk:
-                    session.setdefault("audio_chunks", []).append(base64.b64decode(chunk))
+                    audio_chunk = base64.b64decode(chunk)
+                    session.setdefault("audio_chunks", []).append(audio_chunk)
+                    session["audio_chunk_count"] = session.get("audio_chunk_count", 0) + 1
+                    session["audio_byte_count"] = session.get("audio_byte_count", 0) + len(audio_chunk)
+                    if session["audio_chunk_count"] == 1 or session["audio_chunk_count"] % 25 == 0:
+                        specialist_log(
+                            "audio.chunk.received",
+                            patientId=patient_id,
+                            specialistId=specialist["id"],
+                            sessionId=session_id,
+                            chunks=session["audio_chunk_count"],
+                            audioBytes=session["audio_byte_count"],
+                        )
                 continue
             if event_type == "audio.end":
                 if not session.get("audio_chunks"):
-                    continue
-                if not os.getenv("ELEVENLABS_API_KEY"):
-                    await websocket.send_json({
-                        "type": "session.error",
-                        "sessionId": session_id,
-                        "message": "ELEVENLABS_API_KEY is not configured for live speech recognition.",
-                    })
-                    session["audio_chunks"] = []
+                    specialist_log("audio.end.empty", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
                     continue
                 try:
-                    from claw.convo_elevenlabs import speech_to_text
                     audio_bytes = b"".join(session.get("audio_chunks", []))
                     session["audio_chunks"] = []
+                    specialist_log(
+                        "audio.end.received",
+                        patientId=patient_id,
+                        specialistId=specialist["id"],
+                        sessionId=session_id,
+                        audioBytes=len(audio_bytes),
+                        chunks=session.get("audio_chunk_count", 0),
+                    )
+                    session["audio_chunk_count"] = 0
+                    session["audio_byte_count"] = 0
                     if payload.get("format") == "pcm16":
                         audio_bytes = pcm16_to_wav_bytes(audio_bytes)
                         audio_format = "wav"
                     else:
                         audio_format = payload.get("format") or "ogg"
-                    user_text = speech_to_text(audio_bytes, audio_format=audio_format).strip()
+                    user_text = transcribe_audio(audio_bytes, audio_format=audio_format).strip()
                 except Exception as exc:
+                    specialist_log("stt.request.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
                     await websocket.send_json({
                         "type": "session.error",
                         "sessionId": session_id,
-                        "message": f"Unable to transcribe audio: {exc}",
+                        "message": "Still listening.",
                     })
                     continue
                 if not user_text:
+                    specialist_log("stt.empty", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
                     continue
                 event_type = "user.transcript.final"
                 payload = {"text": user_text}
@@ -991,10 +1095,11 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                 try:
                     reply_payload = specialist_reply_payload(session, user_text)
                 except Exception as exc:
+                    specialist_log("llm.request.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
                     await websocket.send_json({
                         "type": "session.error",
                         "sessionId": session_id,
-                        "message": str(exc),
+                        "message": "One moment.",
                     })
                     continue
                 await websocket.send_json({
@@ -1004,22 +1109,44 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     "text": reply_payload["text"],
                     "createdAt": datetime.now(timezone.utc).isoformat(),
                 })
+                specialist_log(
+                    "agent.transcript.sent",
+                    patientId=patient_id,
+                    specialistId=specialist["id"],
+                    sessionId=session_id,
+                    textChars=len(reply_payload["text"]),
+                )
                 audio = reply_payload["audio"]
                 if audio:
                     await websocket.send_json({
                         "type": "agent.audio",
                         "sessionId": session_id,
-                        "format": "mp3",
+                        "format": reply_payload.get("format") or "mp3",
                         "audioBase64": audio,
                     })
+                    specialist_log(
+                        "agent.audio.sent",
+                        patientId=patient_id,
+                        specialistId=specialist["id"],
+                        sessionId=session_id,
+                        format=reply_payload.get("format") or "mp3",
+                        base64Chars=len(audio),
+                    )
+                else:
+                    specialist_log("agent.audio.missing", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
     except WebSocketDisconnect:
+        specialist_log("websocket.disconnected", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
         return
     except Exception as exc:
-        await websocket.send_json({
-            "type": "session.error",
-            "sessionId": session_id,
-            "message": str(exc),
-        })
+        specialist_log("websocket.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
+        try:
+            await websocket.send_json({
+                "type": "session.error",
+                "sessionId": session_id,
+                "message": "The specialist is reconnecting.",
+            })
+        except Exception:
+            return
 
 
 @app.post("/analyze")
