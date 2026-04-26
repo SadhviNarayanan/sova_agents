@@ -159,6 +159,7 @@ high_risk_episodes: Dict[str, dict] = {}
 simulation_modes: Dict[str, str] = {}
 high_risk_lock = threading.Lock()
 HIGH_RISK_COOLDOWN = timedelta(minutes=15)
+DEFAULT_SIMULATION_PATIENT_ID = "default"
 executor = ThreadPoolExecutor()
 USE_BIGQUERY_VITALS = os.getenv("SOVA_USE_BIGQUERY_VITALS", "false").lower() in {"1", "true", "yes"}
 
@@ -608,14 +609,18 @@ def trigger_high_risk_once(patient_id: str, request: AnalyzeRequest, raw_vitals:
 @app.post("/v1/patients/{patient_id}/simulation", response_model=SimulationModeResponse)
 async def set_patient_simulation(patient_id: str, request: SimulationModeRequest):
     mode = normalized_simulation_mode(request.mode)
-    simulation_modes[patient_id] = mode
+    simulation_key = DEFAULT_SIMULATION_PATIENT_ID if patient_id in {"*", "all", "default"} else patient_id
+    simulation_modes[simulation_key] = mode
     if mode != "high":
         with high_risk_lock:
-            high_risk_episodes.pop(patient_id, None)
+            if simulation_key == DEFAULT_SIMULATION_PATIENT_ID:
+                high_risk_episodes.clear()
+            else:
+                high_risk_episodes.pop(patient_id, None)
     return SimulationModeResponse(
-        patientId=patient_id,
+        patientId=simulation_key,
         mode=mode,
-        statusUrl=f"/v1/patients/{patient_id}/status",
+        statusUrl=f"/v1/patients/{simulation_key}/status",
     )
 
 
@@ -636,7 +641,7 @@ async def patient_status(patient_id: str):
             print(f"Unable to read patient profile from BigQuery for patientId={patient_id}: {exc}")
 
     if not raw_vitals:
-        mode = simulation_modes.get(patient_id, "low")
+        mode = simulation_modes.get(patient_id, simulation_modes.get(DEFAULT_SIMULATION_PATIENT_ID, "low"))
         raw_vitals = simulated_vitals_row(patient_id, mode)
     else:
         mode = risk_level_for_anomaly(simple_vitals_anomaly(status_vitals_from_row(patient_id, raw_vitals)))
