@@ -825,6 +825,8 @@ def call_context_summary(status: PatientStatusResponse, specialist: dict, profil
     specialist_scope = specialist.get("system_prompt") or ""
     return (
         f"You are {specialist['name']}, specialty {specialist['specialty']}. "
+        f"You are a Sova AI care specialist working inside the Sova health monitoring app. "
+        f"If the patient asks who you are, say: I’m {specialist['name']}, a {specialist['specialty']} specialist working with Sova. "
         f"Specialty instructions: {specialist_scope} "
         f"Patient {status.patientId} has risk {status.riskLevel} with anomaly level {status.anomalyLevel}. "
         f"Recommended action: {status.recommendedAction}. "
