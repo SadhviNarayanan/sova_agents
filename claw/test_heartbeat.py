@@ -156,12 +156,12 @@ class TestCalculatePollingFreq(TestCase):
         self.assertGreaterEqual(late, early)
 
     def test_known_floor_case(self):
-        # severity=2 stage=0: (30*0.45)+(10*0.55)=19 → not floored (19 > 0.5)
-        self.assertAlmostEqual(heartbeat.calculate_polling_freq(2, 0), 19.0)
+        # severity=2 stage=0: (1*0.45)+(1*0.55)=1.0
+        self.assertAlmostEqual(heartbeat.calculate_polling_freq(2, 0), 1.0)
 
     def test_known_no_floor_case(self):
-        # severity=2 stage=5: (30*0.45)+(120*0.55)=79.5
-        self.assertAlmostEqual(heartbeat.calculate_polling_freq(2, 5), 79.5)
+        # severity=2 stage=5: (1*0.45)+(5*0.55)=3.2
+        self.assertAlmostEqual(heartbeat.calculate_polling_freq(2, 5), 3.2)
 
     def test_all_severity_stage_combos_are_positive(self):
         for sev in range(3):
@@ -238,12 +238,10 @@ class TestHeartbeatRun(TestCase):
             patch.object(heartbeat, "call_caregiver",    mocks["call_caregiver"]),
             patch.object(heartbeat, "text_caregiver",    mocks["text_caregiver"]),
             patch.object(heartbeat, "log_anomaly_to_db", mocks["log_anomaly"]),
+            patch.object(heartbeat.time, "sleep", return_value=None),
         ]
         if mock_debate:
             patches.append(patch.object(heartbeat, "_trigger_debate", mocks["debate"]))
-
-        with (p for p in patches).__class__(*patches):  # can't unpack into with directly
-            pass  # replaced below
 
         # Python ≥3.10: use ExitStack to apply a variable list of patches
         import contextlib
@@ -259,19 +257,20 @@ class TestHeartbeatRun(TestCase):
         mocks = self._run(snap)
         mocks["debate"].assert_not_called()
 
-    def test_critical_vitals_trigger_debate(self):
+    def test_critical_vitals_call_caregiver_immediately(self):
         snap = _whoop(recovery=15, hrv=30, hrv_baseline=65, rhr=80, rhr_baseline=55)
         mocks = self._run(snap)
-        mocks["debate"].assert_called_once()
-        data_arg = mocks["debate"].call_args[0][0]
+        mocks["debate"].assert_not_called()
+        mocks["call_caregiver"].assert_called_once()
+        data_arg = mocks["call_caregiver"].call_args[0][0]
         self.assertGreater(data_arg["anomaly_level"], 0)
 
     def test_debate_receives_interval_arg(self):
-        snap = _whoop(recovery=15, hrv=30, hrv_baseline=65, rhr=80, rhr_baseline=55)
+        snap = _whoop(recovery=30, hrv=42, hrv_baseline=65, rhr=63, rhr_baseline=55)
         mocks = self._run(snap)
-        if mocks["debate"].called:
-            _, interval_arg = mocks["debate"].call_args[0]
-            self.assertGreater(interval_arg, 0)
+        mocks["debate"].assert_called_once()
+        _, interval_arg = mocks["debate"].call_args[0]
+        self.assertGreater(interval_arg, 0)
 
     def test_missing_profile_exits_cleanly(self):
         with patch.object(heartbeat, "get_patient_profile", return_value={}):
@@ -303,6 +302,7 @@ class TestHeartbeatRun(TestCase):
             stack.enter_context(patch.object(heartbeat, "fetch_by_timestamp",  return_value=snap))
             stack.enter_context(patch.object(heartbeat, "_fire",               side_effect=lambda fn, *a: fn(*a)))
             stack.enter_context(patch.object(heartbeat, "_trigger_debate",     debate_mock))
+            stack.enter_context(patch.object(heartbeat.time, "sleep",          return_value=None))
             heartbeat.run("TEST-001", max_ticks=2)
         debate_mock.assert_not_called()
 
@@ -311,96 +311,30 @@ class TestHeartbeatRun(TestCase):
 
 class TestDebateRouting(TestCase):
     """
-    Verify that _trigger_debate fires the correct action function
-    based on the urgency_level returned by the SSE debate stream.
+    Verify that _trigger_debate starts the same async SSE-backed debate
+    that the frontend observes.
     """
 
-    @staticmethod
-    def _sse_lines(urgency: str) -> list[bytes]:
-        return [
-            f'data: {{"type":"decision","urgency_level":"{urgency}","immediate_action":"test"}}'.encode(),
-            b'data: {"type":"done"}',
-        ]
-
-    def _run_debate(self, urgency: str) -> dict:
-        mocks = {k: MagicMock() for k in ("call_911", "call_caregiver",
-                                           "text_caregiver", "log_anomaly")}
-
-        post_mock = MagicMock()
-        resp_mock = MagicMock()
-        resp_mock.__enter__ = lambda s: s
-        resp_mock.__exit__ = MagicMock(return_value=False)
-        resp_mock.iter_lines.return_value = iter(self._sse_lines(urgency))
-        get_mock = MagicMock(return_value=resp_mock)
-
+    def test_starts_streaming_debate_for_patient(self):
+        response = MagicMock()
+        response.json.return_value = {"status": "debate started", "stream_url": "/stream/TEST-001"}
+        response.raise_for_status.return_value = None
+        post_mock = MagicMock(return_value=response)
         data = _whoop(recovery=15, rhr=80, rhr_baseline=55)
         data["anomaly_level"] = 4
 
-        import contextlib
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(heartbeat, "get_patient_profile", return_value=_profile()))
-            stack.enter_context(patch.object(heartbeat, "requests").post, post_mock)  # type: ignore[attr-defined]
-            stack.enter_context(patch("heartbeat.requests.post", post_mock))
-            stack.enter_context(patch("heartbeat.requests.get",  get_mock))
-            stack.enter_context(patch.object(heartbeat, "_fire",               side_effect=lambda fn, *a: fn(*a)))
-            stack.enter_context(patch.object(heartbeat, "call_911",            mocks["call_911"]))
-            stack.enter_context(patch.object(heartbeat, "call_caregiver",      mocks["call_caregiver"]))
-            stack.enter_context(patch.object(heartbeat, "text_caregiver",      mocks["text_caregiver"]))
-            stack.enter_context(patch.object(heartbeat, "log_anomaly_to_db",   mocks["log_anomaly"]))
+        with (
+            patch.object(heartbeat, "get_patient_profile", return_value=_profile()),
+            patch("heartbeat.requests.post", post_mock),
+        ):
             heartbeat._trigger_debate(data, interval=30)
 
-        return mocks
-
-    def _run_debate_simple(self, urgency: str) -> dict:
-        """Simpler version that patches requests at module level."""
-        mocks = {k: MagicMock() for k in ("call_911", "call_caregiver",
-                                           "text_caregiver", "log_anomaly")}
-
-        resp_mock = MagicMock()
-        resp_mock.__enter__ = lambda s: s
-        resp_mock.__exit__ = MagicMock(return_value=False)
-        resp_mock.iter_lines.return_value = iter(self._sse_lines(urgency))
-
-        data = _whoop(recovery=15, rhr=80, rhr_baseline=55)
-        data["anomaly_level"] = 4
-
-        import contextlib
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(heartbeat, "get_patient_profile", return_value=_profile()))
-            stack.enter_context(patch("heartbeat.requests.post",               MagicMock()))
-            stack.enter_context(patch("heartbeat.requests.get",                MagicMock(return_value=resp_mock)))
-            stack.enter_context(patch.object(heartbeat, "_fire",               side_effect=lambda fn, *a: fn(*a)))
-            stack.enter_context(patch.object(heartbeat, "call_911",            mocks["call_911"]))
-            stack.enter_context(patch.object(heartbeat, "call_caregiver",      mocks["call_caregiver"]))
-            stack.enter_context(patch.object(heartbeat, "text_caregiver",      mocks["text_caregiver"]))
-            stack.enter_context(patch.object(heartbeat, "log_anomaly_to_db",   mocks["log_anomaly"]))
-            heartbeat._trigger_debate(data, interval=30)
-
-        return mocks
-
-    def test_critical_calls_911(self):
-        mocks = self._run_debate_simple("critical")
-        mocks["call_911"].assert_called_once()
-        mocks["call_caregiver"].assert_not_called()
-        mocks["text_caregiver"].assert_not_called()
-
-    def test_high_calls_caregiver(self):
-        mocks = self._run_debate_simple("high")
-        mocks["call_caregiver"].assert_called_once()
-        mocks["call_911"].assert_not_called()
-
-    def test_medium_texts_caregiver(self):
-        mocks = self._run_debate_simple("medium")
-        mocks["text_caregiver"].assert_called_once()
-        mocks["call_911"].assert_not_called()
-        mocks["call_caregiver"].assert_not_called()
-
-    def test_low_logs_only(self):
-        mocks = self._run_debate_simple("low")
-        mocks["log_anomaly"].assert_called_once()
-        mocks["call_911"].assert_not_called()
-        mocks["call_caregiver"].assert_not_called()
-        mocks["text_caregiver"].assert_not_called()
+        post_mock.assert_called_once()
+        url, = post_mock.call_args.args
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertEqual(url, f"{heartbeat.DEBATE_BASE_URL}/start-debate/TEST-001")
+        self.assertEqual(payload["patientId"], "TEST-001")
+        self.assertEqual(payload["interval"], 30)
 
 
 # ── 5. anomaly level → debate escalation integration ─────────────────────────

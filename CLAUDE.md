@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CareRelay is an AI-powered post-hospital care monitoring system. Its core innovation is a **multi-agent council** of 7 specialist medical agents that debate conversationally and reach consensus before making clinical decisions (e.g., escalating a post-MI cardiac patient).
+CareRelay is an AI-powered post-hospital care monitoring system. Its core innovation is a **multi-agent council** of specialist medical agents that debate conversationally and reach consensus before making clinical decisions (e.g., escalating a post-MI cardiac patient).
 
 ## Setup
 
@@ -36,8 +36,8 @@ cd carerelay_backend && python main.py
 # Run backend demo
 python carerelay_backend/demo_council.py
 
-# Run API tests
-python carerelay_backend/test_api.py
+# Run heartbeat unit tests
+python claw/test_heartbeat.py
 ```
 
 ## Architecture
@@ -45,10 +45,10 @@ python carerelay_backend/test_api.py
 There are two parallel orchestration implementations:
 
 ### 1. Original Orchestrator (`agentic_convo.py`)
-Manual Python orchestration loop. `MedicalCouncilOrchestrator` manages 7 `MedicalAgent` instances. Each agent has a specialty, short-term memory (last 3 interactions), confidence score, and speak count. The orchestrator routes agents in a dynamic speaking order (specialty-weighted by patient case), runs rounds of debate, and detects convergence via keyword heuristics + optional LLM judge.
+Manual Python orchestration loop. `MedicalCouncilOrchestrator` manages medical specialist agents. Each agent has a specialty, short-term memory (last 3 interactions), confidence score, and speak count. The orchestrator routes agents in a dynamic speaking order (specialty-weighted by patient case), runs rounds of debate, and detects convergence via keyword heuristics + optional LLM judge.
 
 ### 2. LangGraph Orchestrator (`langgraph_council.py`)
-Refactor of the above using `StateGraph` with typed state, conditional edges, and better debugging. Uses the same 7 agents and convergence logic. `demo_langgraph.py` / `demo_comparison.py` exercise this path.
+Refactor of the above using `StateGraph` with typed state, conditional edges, and better debugging. Uses an expanded specialist council and convergence logic. `demo_langgraph.py` / `demo_comparison.py` exercise this path.
 
 ### FastAPI Backend (`carerelay_backend/`)
 - **`main.py`** — REST endpoints (see API section below). All imports use `carerelay_backend.*` package paths (required for Render deployment from repo root).
@@ -60,7 +60,7 @@ Refactor of the above using `StateGraph` with typed state, conditional edges, an
 | Endpoint | Caller | Behavior |
 |---|---|---|
 | `POST /start-debate/{patient_id}` | OpenClaw | Returns immediately; runs debate in background; POSTs final decision to `webhook_url` when done |
-| `GET /stream/{patient_id}` | Frontend | SSE stream — doctor messages arrive one by one, then the final decision event |
+| `GET /stream/{patient_id}` | Frontend | SSE stream — doctor messages arrive one by one, then the final decision event. Recent event history is replayed for late subscribers. |
 | `POST /analyze` | OpenClaw (blocking) | Blocks until debate complete, returns full decision in one response |
 
 ### Integration Pattern
@@ -124,5 +124,5 @@ OpenClaw POST /start-debate  →  debate runs in background thread
 - **IFM K2 Think V2 risk simulation** is stubbed (mock returns).
 - **ElevenLabs voice** is scripted but not connected to the API.
 - **Auth0** authentication is planned but not implemented.
-- **No automated test suite** — only manual demo scripts exist.
+- **Partial automated tests** — `claw/test_heartbeat.py` covers heartbeat polling and debate trigger behavior.
 - LangGraph implementation uses GPT-4 directly; no fallback handling yet.

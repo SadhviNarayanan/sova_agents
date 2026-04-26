@@ -7,8 +7,9 @@ import json
 import os
 import sys
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from carerelay_backend.agents import AGENT_PROMPTS
 import anthropic  # For Claude API integration
 
@@ -16,6 +17,9 @@ import anthropic  # For Claude API integration
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agentic_convo import MedicalCouncilOrchestrator
 from langgraph_council import LangGraphMedicalCouncil
+from claw.anomaly import infer_anomaly_level
+from claw.call_twilio import call_caregiver
+from claw.query import get_latest_vitals, get_patient_profile
 
 app = FastAPI(title="CareRelay API", description="AI-powered post-hospital care monitoring system")
 
@@ -64,6 +68,32 @@ class Vitals(BaseModel):
     Temperature: Optional[float] = None
     TimeStamp: Optional[datetime] = None
 
+class StatusVitals(BaseModel):
+    heartRate: Optional[int] = None
+    hrv: Optional[int] = None
+    sleepHours: Optional[float] = None
+    bloodPressure: Optional[str] = None
+    temperature: Optional[float] = None
+    timestamp: Optional[str] = None
+
+class StatusEscalation(BaseModel):
+    caregiverCallTriggered: bool = False
+    reason: Optional[str] = None
+
+class StatusDeliberation(BaseModel):
+    triggered: bool = False
+    status: str = "idle"
+    streamUrl: Optional[str] = None
+
+class PatientStatusResponse(BaseModel):
+    patientId: str
+    vitals: StatusVitals
+    anomalyLevel: int
+    riskLevel: str
+    recommendedAction: str
+    escalation: StatusEscalation
+    deliberation: StatusDeliberation
+
 class AnalyzeRequest(BaseModel):
     # Patient profile
     patientId: str
@@ -99,8 +129,14 @@ class AnalyzeRequest(BaseModel):
 # In-memory storage (in production, use database)
 patients: Dict[str, PatientState] = {}
 
-# Per-patient event queues for SSE streaming
-debate_queues: Dict[str, asyncio.Queue] = {}
+# Per-patient in-memory SSE state.
+# History lets a frontend connect a few seconds late and still see the full debate.
+debate_histories: Dict[str, List[dict]] = {}
+debate_subscribers: Dict[str, List[asyncio.Queue]] = {}
+debate_status: Dict[str, str] = {}
+high_risk_episodes: Dict[str, dict] = {}
+high_risk_lock = threading.Lock()
+HIGH_RISK_COOLDOWN = timedelta(minutes=15)
 executor = ThreadPoolExecutor()
 
 @app.get("/")
@@ -148,6 +184,297 @@ def build_patient_dict(request: AnalyzeRequest) -> dict:
             "phone": request.EmergencyContactPhone,
         },
     }
+
+
+def risk_level_for_anomaly(anomaly_level: int) -> str:
+    if anomaly_level >= 3:
+        return "high"
+    if anomaly_level == 2:
+        return "medium"
+    return "low"
+
+
+def recommended_action_for_risk(risk_level: str) -> str:
+    if risk_level == "high":
+        return "Sova is contacting your caregiver"
+    if risk_level == "medium":
+        return "Talk with an AI specialist"
+    return "Continue monitoring"
+
+
+def _int_or_none(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_or_none(value) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _value(raw: dict, *keys: str):
+    for key in keys:
+        if key in raw and raw[key] is not None:
+            return raw[key]
+    return None
+
+
+def status_vitals_from_row(patient_id: str, raw: dict) -> StatusVitals:
+    return StatusVitals(
+        heartRate=_int_or_none(_value(raw, "heartRate", "HeartRate", "resting_heart_rate", "rhr")),
+        hrv=_int_or_none(_value(raw, "hrv", "HRV")),
+        sleepHours=_float_or_none(_value(raw, "sleepHours", "sleep_hours", "SleepHours")),
+        bloodPressure=_string_or_none(_value(raw, "bloodPressure", "BloodPressure", "blood_pressure")),
+        temperature=_float_or_none(_value(raw, "temperature", "Temperature")),
+        timestamp=_string_or_none(_value(raw, "timestamp", "TimeStamp", "Timestamp", "date")),
+    )
+
+
+def anomaly_snapshot(patient_id: str, raw: dict, vitals: StatusVitals) -> dict:
+    snapshot = dict(raw)
+    snapshot.setdefault("user_id", patient_id)
+    snapshot.setdefault("date", vitals.timestamp)
+    if vitals.heartRate is not None:
+        snapshot.setdefault("resting_heart_rate", vitals.heartRate)
+        snapshot.setdefault("rhr_baseline", _int_or_none(_value(raw, "rhr_baseline", "RhrBaseline")) or vitals.heartRate)
+    if vitals.hrv is not None:
+        snapshot.setdefault("hrv", vitals.hrv)
+        snapshot.setdefault("hrv_baseline", _int_or_none(_value(raw, "hrv_baseline", "HrvBaseline")) or vitals.hrv)
+    if vitals.sleepHours is not None:
+        snapshot.setdefault("sleep_performance", _float_or_none(_value(raw, "sleep_performance", "performance")) or 75)
+    return snapshot
+
+
+def simple_vitals_anomaly(vitals: StatusVitals) -> int:
+    level = 0
+    heart_rate = vitals.heartRate
+    if heart_rate is not None:
+        if heart_rate >= 130 or heart_rate < 40:
+            level = max(level, 4)
+        elif heart_rate >= 120 or heart_rate < 45:
+            level = max(level, 3)
+        elif heart_rate >= 105 or heart_rate < 50:
+            level = max(level, 2)
+
+    temperature = vitals.temperature
+    if temperature is not None:
+        if temperature >= 103:
+            level = max(level, 4)
+        elif temperature >= 101.5:
+            level = max(level, 3)
+        elif temperature >= 100.4:
+            level = max(level, 2)
+
+    pressure = vitals.bloodPressure
+    if pressure:
+        parts = pressure.replace(" ", "").split("/")
+        if len(parts) == 2:
+            systolic = _int_or_none(parts[0])
+            diastolic = _int_or_none(parts[1])
+            if systolic is not None and diastolic is not None:
+                if systolic >= 180 or diastolic >= 120:
+                    level = max(level, 4)
+                elif systolic >= 160 or diastolic >= 100:
+                    level = max(level, 3)
+    return level
+
+
+def infer_patient_anomaly(patient_id: str, raw: dict, vitals: StatusVitals) -> int:
+    model_level = infer_anomaly_level(anomaly_snapshot(patient_id, raw, vitals))
+    return max(model_level, simple_vitals_anomaly(vitals))
+
+
+def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _date_value(value, fallback: date) -> date:
+    if isinstance(value, date):
+        return value
+    if value:
+        return date.fromisoformat(str(value))
+    return fallback
+
+
+def analyze_request_for_status(patient_id: str, profile: dict, vitals: StatusVitals, anomaly_level: int, risk_level: str) -> AnalyzeRequest:
+    today = date.today()
+    discharge = _date_value(profile.get("DischargeDate"), today)
+    dob = profile.get("DateOfBirth")
+    return AnalyzeRequest(
+        patientId=patient_id,
+        Age=_int_or_none(profile.get("Age")) or 0,
+        Gender=str(profile.get("Gender") or "Unknown"),
+        DateOfBirth=_date_value(dob, today) if dob else None,
+        Address=_string_or_none(profile.get("Address")),
+        Surgery=str(profile.get("Surgery") or "Post-discharge recovery"),
+        DischargeDate=discharge,
+        RiskLevel=risk_level.capitalize(),
+        BloodPressure=vitals.bloodPressure,
+        HeartRate=vitals.heartRate,
+        Allergies=_string_or_none(profile.get("Allergies")) or "None",
+        CurrentMedications=_string_or_none(profile.get("CurrentMedications")) or "None",
+        DoctorPhoneNumber=_string_or_none(profile.get("DoctorPhoneNumber")),
+        EmergencyContactName=_string_or_none(profile.get("EmergencyContactName")),
+        EmergencyContactPhone=_string_or_none(profile.get("EmergencyContactPhone")),
+        severity=2 if risk_level == "high" else 1 if risk_level == "medium" else 0,
+        stage=_int_or_none(profile.get("stage")),
+        anomaly_level=anomaly_level,
+        interval=30 if risk_level == "high" else 60 if risk_level == "medium" else 300,
+        vitals=Vitals(
+            HeartRate=vitals.heartRate,
+            BloodPressure=vitals.bloodPressure,
+            Temperature=vitals.temperature,
+            TimeStamp=parse_timestamp(vitals.timestamp),
+        ),
+    )
+
+
+def start_debate_session(patient_id: str, request: AnalyzeRequest, loop: asyncio.AbstractEventLoop) -> dict:
+    debate_histories[patient_id] = []
+    debate_subscribers[patient_id] = debate_subscribers.get(patient_id, [])
+    debate_status[patient_id] = "running"
+
+    def publish(event: dict):
+        payload = dict(event)
+        payload.setdefault("patient_id", patient_id)
+        if payload.get("type") == "done":
+            payload.setdefault("event", "done")
+            debate_status[patient_id] = "done"
+        elif payload.get("type") == "error":
+            payload.setdefault("event", "error")
+            debate_status[patient_id] = "error"
+
+        debate_histories.setdefault(patient_id, []).append(payload)
+        for subscriber in list(debate_subscribers.get(patient_id, [])):
+            subscriber.put_nowait(payload)
+
+    def on_event(event):
+        loop.call_soon_threadsafe(publish, event)
+
+    def run():
+        try:
+            council = LangGraphMedicalCouncil(max_utterances=8, event_callback=on_event)
+            council.orchestrate_debate(build_patient_dict(request), webhook_url=request.webhook_url)
+        except Exception as exc:
+            on_event({
+                "type": "error",
+                "event": "error",
+                "patient_id": patient_id,
+                "message": str(exc),
+            })
+
+    loop.run_in_executor(executor, run)
+    return {
+        "status": "debate started",
+        "patient_id": patient_id,
+        "stream_url": f"/stream/{patient_id}",
+        "note": "Final decision will be POSTed to webhook_url when complete"
+    }
+
+
+def current_deliberation(patient_id: str) -> StatusDeliberation:
+    status = debate_status.get(patient_id)
+    has_history = patient_id in debate_histories
+    if status or has_history:
+        return StatusDeliberation(
+            triggered=True,
+            status=status or "running",
+            streamUrl=f"/stream/{patient_id}",
+        )
+    return StatusDeliberation()
+
+
+def safe_call_caregiver(payload: dict):
+    try:
+        call_caregiver(payload)
+    except Exception as exc:
+        print(f"Caregiver call failed for patientId={payload.get('patientId') or payload.get('patient_id')}: {exc}")
+
+
+def trigger_high_risk_once(patient_id: str, request: AnalyzeRequest, raw_vitals: dict, loop: asyncio.AbstractEventLoop) -> StatusEscalation:
+    now = datetime.now(timezone.utc)
+    with high_risk_lock:
+        episode = high_risk_episodes.get(patient_id)
+        if episode and now - episode["started_at"] < HIGH_RISK_COOLDOWN:
+            if not current_deliberation(patient_id).triggered:
+                start_debate_session(patient_id, request, loop)
+            return StatusEscalation(
+                caregiverCallTriggered=True,
+                reason="Caregiver escalation already started for this high-risk episode.",
+            )
+        high_risk_episodes[patient_id] = {"started_at": now}
+
+    caregiver_payload = dict(raw_vitals)
+    caregiver_payload.setdefault("patientId", patient_id)
+    caregiver_payload.setdefault("patient_id", patient_id)
+    loop.run_in_executor(executor, safe_call_caregiver, caregiver_payload)
+    start_debate_session(patient_id, request, loop)
+    return StatusEscalation(
+        caregiverCallTriggered=True,
+        reason="High risk detected. Sova started caregiver escalation.",
+    )
+
+
+@app.get("/v1/patients/{patient_id}/status", response_model=PatientStatusResponse)
+async def patient_status(patient_id: str):
+    try:
+        raw_vitals = get_latest_vitals(patient_id)
+    except Exception as exc:
+        print(f"Unable to read latest vitals from BigQuery for patientId={patient_id}: {exc}")
+        raise HTTPException(status_code=503, detail="Unable to read latest vitals")
+
+    if not raw_vitals:
+        print(f"No vitals row found in BigQuery for patientId={patient_id}")
+        raise HTTPException(status_code=404, detail="No vitals found for patient")
+
+    try:
+        profile = get_patient_profile(patient_id)
+    except Exception as exc:
+        print(f"Unable to read patient profile from BigQuery for patientId={patient_id}: {exc}")
+        profile = {}
+
+    vitals = status_vitals_from_row(patient_id, raw_vitals)
+    anomaly_level = infer_patient_anomaly(patient_id, raw_vitals, vitals)
+    risk_level = risk_level_for_anomaly(anomaly_level)
+    action = recommended_action_for_risk(risk_level)
+    escalation = StatusEscalation()
+
+    if risk_level == "high":
+        request = analyze_request_for_status(patient_id, profile, vitals, anomaly_level, risk_level)
+        escalation = trigger_high_risk_once(patient_id, request, raw_vitals, asyncio.get_event_loop())
+    else:
+        with high_risk_lock:
+            high_risk_episodes.pop(patient_id, None)
+
+    return PatientStatusResponse(
+        patientId=patient_id,
+        vitals=vitals,
+        anomalyLevel=anomaly_level,
+        riskLevel=risk_level,
+        recommendedAction=action,
+        escalation=escalation,
+        deliberation=current_deliberation(patient_id),
+    )
 
 
 @app.post("/analyze")
@@ -355,25 +682,7 @@ async def start_debate(patient_id: str, request: AnalyzeRequest):
     - Streams doctor events to frontend via GET /stream/{patient_id}
     - Pushes final decision + immediate_action to webhook_url when done
     """
-    queue: asyncio.Queue = asyncio.Queue()
-    debate_queues[patient_id] = queue
-    loop = asyncio.get_event_loop()
-
-    def on_event(event):
-        loop.call_soon_threadsafe(queue.put_nowait, event)
-
-    def run():
-        council = LangGraphMedicalCouncil(max_utterances=8, event_callback=on_event)
-        council.orchestrate_debate(build_patient_dict(request), webhook_url=request.webhook_url)
-
-    loop.run_in_executor(executor, run)
-
-    return {
-        "status": "debate started",
-        "patient_id": patient_id,
-        "stream_url": f"/stream/{patient_id}",
-        "note": "Final decision will be POSTed to webhook_url when complete"
-    }
+    return start_debate_session(patient_id, request, asyncio.get_event_loop())
 
 
 @app.get("/stream/{patient_id}")
@@ -385,21 +694,31 @@ async def stream_debate(patient_id: str):
     async def generate():
         # Wait up to 5 minutes for a debate to start
         for _ in range(300):
-            if patient_id in debate_queues:
+            if patient_id in debate_histories:
                 break
             await asyncio.sleep(1)
         else:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Timed out waiting for debate to start'})}\n\n"
             return
 
-        queue = debate_queues[patient_id]
-        while True:
-            event = await queue.get()
+        for event in debate_histories.get(patient_id, []):
             yield f"data: {json.dumps(event, default=str)}\n\n"
             if event.get("type") in ("done", "error"):
-                break
+                return
 
-        debate_queues.pop(patient_id, None)
+        queue: asyncio.Queue = asyncio.Queue()
+        debate_subscribers.setdefault(patient_id, []).append(queue)
+        try:
+            while True:
+                event = await queue.get()
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+                if event.get("type") in ("done", "error"):
+                    break
+        finally:
+            subscribers = debate_subscribers.get(patient_id, [])
+            if queue in subscribers:
+                subscribers.remove(queue)
+
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",

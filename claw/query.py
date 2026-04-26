@@ -19,6 +19,7 @@ _DATASET = "sova"
 
 _PROFILE_TABLE = f"`{_PROJECT}.{_DATASET}.patientProfile`"
 _VITALS_TABLE  = f"`{_PROJECT}.{_DATASET}.vitals`"
+_COLUMN_CACHE: dict[str, dict[str, str]] = {}
 
 _RISK_TO_SEVERITY: dict[str, int] = {
     "low":      0,
@@ -33,6 +34,47 @@ _STAGE_THRESHOLDS = [2, 7, 14, 30, 60]  # days since discharge → stage 0-5
 
 def _client() -> bigquery.Client:
     return bigquery.Client(project=_PROJECT)
+
+
+def _patient_id_job_config(patient_id: str) -> bigquery.QueryJobConfig:
+    return bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("patient_id", "STRING", patient_id),
+        ]
+    )
+
+
+def _columns_for_table(table_name: str) -> dict[str, str]:
+    if table_name in _COLUMN_CACHE:
+        return _COLUMN_CACHE[table_name]
+
+    rows = list(_client().query(
+        f"""
+        SELECT column_name
+        FROM `{_PROJECT}.{_DATASET}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name = @table_name
+        """,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("table_name", "STRING", table_name),
+            ]
+        ),
+    ))
+    columns = {str(row["column_name"]).lower(): str(row["column_name"]) for row in rows}
+    _COLUMN_CACHE[table_name] = columns
+    return columns
+
+
+def _column_for(table_name: str, *candidates: str) -> str:
+    columns = _columns_for_table(table_name)
+    for candidate in candidates:
+        actual = columns.get(candidate.lower())
+        if actual:
+            return actual
+    raise KeyError(
+        f"None of {candidates} exist in {_PROJECT}.{_DATASET}.{table_name}. "
+        f"Available columns: {sorted(columns.values())}"
+    )
 
 
 def _parse_dt(value) -> datetime:
@@ -67,9 +109,9 @@ def get_patient_profile(patient_id: str) -> dict:
     rows = list(_client().query(f"""
         SELECT *
         FROM {_PROFILE_TABLE}
-        WHERE patientId = '{patient_id}'
+        WHERE patientId = @patient_id
         LIMIT 1
-    """))
+    """, job_config=_patient_id_job_config(patient_id)))
     if not rows:
         return {}
 
@@ -96,12 +138,14 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
     Returns the number of rows corrected.
     """
     client = _client()
+    patient_col = _column_for("vitals", "patientId", "PatientId", "PatientID", "patientID")
+    timestamp_col = _column_for("vitals", "TimeStamp", "Timestamp", "timestamp")
 
     rows = list(client.query(f"""
-        SELECT TimeStamp FROM {_VITALS_TABLE}
-        WHERE patientId = '{patient_id}'
-        ORDER BY TimeStamp ASC
-    """))
+        SELECT `{timestamp_col}` AS TimeStamp FROM {_VITALS_TABLE}
+        WHERE `{patient_col}` = @patient_id
+        ORDER BY `{timestamp_col}` ASC
+    """, job_config=_patient_id_job_config(patient_id)))
     if not rows:
         return 0
 
@@ -115,12 +159,19 @@ def fix_vitals_timestamps(patient_id: str, freq_seconds: float) -> int:
         if abs((actual - expected).total_seconds()) < 1:
             continue
 
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("expected_ts", "TIMESTAMP", expected),
+                bigquery.ScalarQueryParameter("patient_id", "STRING", patient_id),
+                bigquery.ScalarQueryParameter("actual_ts", "TIMESTAMP", actual),
+            ]
+        )
         client.query(f"""
             UPDATE {_VITALS_TABLE}
-            SET TimeStamp = TIMESTAMP('{expected.isoformat()}')
-            WHERE patientId = '{patient_id}'
-              AND TimeStamp = TIMESTAMP('{actual.isoformat()}')
-        """).result()
+            SET `{timestamp_col}` = @expected_ts
+            WHERE `{patient_col}` = @patient_id
+              AND `{timestamp_col}` = @actual_ts
+        """, job_config=job_config).result()
         fixed += 1
 
     return fixed
@@ -185,13 +236,15 @@ def insert_vitals() -> None:
 
 def get_latest_vitals(patient_id: str) -> dict:
     """Fetch the most-recent vitals row for a patient."""
+    patient_col = _column_for("vitals", "patientId", "PatientId", "PatientID", "patientID")
+    timestamp_col = _column_for("vitals", "TimeStamp", "Timestamp", "timestamp")
     rows = list(_client().query(f"""
         SELECT *
         FROM {_VITALS_TABLE}
-        WHERE patientId = '{patient_id}'
-        ORDER BY TimeStamp DESC
+        WHERE `{patient_col}` = @patient_id
+        ORDER BY `{timestamp_col}` DESC
         LIMIT 1
-    """))
+    """, job_config=_patient_id_job_config(patient_id)))
     return dict(rows[0]) if rows else {}
 
 

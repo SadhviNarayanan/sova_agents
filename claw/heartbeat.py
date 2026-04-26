@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import os
 from datetime import datetime, timedelta
 
 import requests
@@ -46,7 +47,7 @@ def calculate_polling_freq(severity: int, stage: int) -> float:
 
 
 def _trigger_debate(data: dict, interval: float = 0) -> None:
-    """POST to /analyze (blocking), then route using escalation_level from the response."""
+    """Start an async debate that the frontend can observe through /stream/{patient_id}."""
     patient_id = data.get("user_id", "unknown")
     profile = get_patient_profile(patient_id) or {}
 
@@ -75,23 +76,19 @@ def _trigger_debate(data: dict, interval: float = 0) -> None:
         },
     }
 
+    webhook_url = data.get("webhook_url") or os.getenv("SOVA_DECISION_WEBHOOK_URL")
+    if webhook_url:
+        payload["webhook_url"] = webhook_url
+
     try:
-        resp = requests.post(f"{DEBATE_BASE_URL}/analyze", json=payload, timeout=300)
+        resp = requests.post(f"{DEBATE_BASE_URL}/start-debate/{patient_id}", json=payload, timeout=30)
         resp.raise_for_status()
         result = resp.json()
     except Exception as exc:
-        print(f"[debate] POST /analyze failed: {exc}")
+        print(f"[debate] POST /start-debate/{patient_id} failed: {exc}")
         return
 
-    level = result.get("escalation_level", 1)
-    print(f"[debate] decision → urgency={result.get('urgency_level')} action={result.get('immediate_action')} level={level}")
-
-    if level == 4:
-        _fire(call_911, data)
-    elif level == 3:
-        _fire(call_caregiver, data)
-    elif level == 2:
-        _fire(text_caregiver, data)
+    print(f"[debate] started patient={patient_id} stream={result.get('stream_url')}")
 
 
 def _log_anomaly(data: dict, level: int) -> None:
