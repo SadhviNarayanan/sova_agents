@@ -1,14 +1,18 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+import base64
+import io
 import json
 import math
 import os
 import sys
 import asyncio
 import threading
+import uuid
+import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta, timezone
 from carerelay_backend.agents import AGENT_PROMPTS
@@ -92,6 +96,13 @@ class StatusTrajectoryPoint(BaseModel):
     riskLevel: str
     riskScore: int
 
+class StatusNotification(BaseModel):
+    type: str
+    title: str
+    message: str
+    requiresResponse: bool = False
+    actions: List[str] = []
+
 class PatientStatusResponse(BaseModel):
     patientId: str
     vitals: StatusVitals
@@ -101,6 +112,7 @@ class PatientStatusResponse(BaseModel):
     escalation: StatusEscalation
     deliberation: StatusDeliberation
     trajectory: List[StatusTrajectoryPoint] = []
+    notification: Optional[StatusNotification] = None
 
 class SimulationModeRequest(BaseModel):
     mode: str
@@ -114,6 +126,14 @@ class SpecialistResponse(BaseModel):
     id: str
     name: str
     specialty: str
+
+class SpecialistCallStartRequest(BaseModel):
+    specialistId: str
+    clientSessionId: str
+
+class SpecialistCallStartResponse(BaseModel):
+    sessionId: str
+    websocketUrl: str
 
 class AnalyzeRequest(BaseModel):
     # Patient profile
@@ -157,11 +177,31 @@ debate_subscribers: Dict[str, List[asyncio.Queue]] = {}
 debate_status: Dict[str, str] = {}
 high_risk_episodes: Dict[str, dict] = {}
 simulation_modes: Dict[str, str] = {}
+specialist_call_sessions: Dict[str, dict] = {}
 high_risk_lock = threading.Lock()
 HIGH_RISK_COOLDOWN = timedelta(minutes=15)
 DEFAULT_SIMULATION_PATIENT_ID = "default"
 executor = ThreadPoolExecutor()
 USE_BIGQUERY_VITALS = os.getenv("SOVA_USE_BIGQUERY_VITALS", "false").lower() in {"1", "true", "yes"}
+
+
+def masked_env_value(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        return "unset"
+    if len(value) <= 8:
+        return f"set(len={len(value)})"
+    return f"set(len={len(value)}, value={value[:4]}...{value[-4:]})"
+
+
+@app.on_event("startup")
+async def log_elevenlabs_env_status():
+    print(
+        "ElevenLabs env status: "
+        f"ELEVENLABS_API_KEY={masked_env_value('ELEVENLABS_API_KEY')}, "
+        f"ELEVENLABS_AGENT_ID={masked_env_value('ELEVENLABS_AGENT_ID')}"
+    )
+
 
 @app.get("/")
 async def root():
@@ -174,6 +214,18 @@ async def specialists():
         SpecialistResponse(id=key, name=config["name"], specialty=config["specialty"])
         for key, config in AGENT_CONFIGS.items()
     ]
+
+
+def specialist_by_id(specialist_id: str) -> dict:
+    config = AGENT_CONFIGS.get(specialist_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Unknown specialist")
+    return {
+        "id": specialist_id,
+        "name": config["name"],
+        "specialty": config["specialty"],
+        "system_prompt": config.get("system_prompt", ""),
+    }
 
 SEVERITY_LABELS = {0: "low", 1: "medium", 2: "high"}
 STAGE_LABELS = {
@@ -300,7 +352,6 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         heart_rate = round(126 + wave * 6)
         hrv = round(25 + slow_wave * 4)
         spo2 = round(88 + oxygen_wave)
-        sleep_hours = round(4.3 + slow_wave * 0.3, 1)
         systolic = round(164 + wave * 8)
         diastolic = round(102 + slow_wave * 5)
         temperature = round(102.1 + slow_wave * 0.4, 1)
@@ -308,7 +359,6 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         heart_rate = round(106 + wave * 4)
         hrv = round(42 + slow_wave * 4)
         spo2 = round(94 + max(-1, min(1, oxygen_wave)))
-        sleep_hours = round(5.8 + slow_wave * 0.4, 1)
         systolic = round(142 + wave * 6)
         diastolic = round(90 + slow_wave * 4)
         temperature = round(100.5 + slow_wave * 0.2, 1)
@@ -316,7 +366,6 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         heart_rate = round(76 + wave * 5 + ((seed % 5) - 2))
         hrv = round(60 + slow_wave * 6)
         spo2 = round(98 + max(-1, min(1, oxygen_wave)))
-        sleep_hours = round(7.3 + slow_wave * 0.4, 1)
         systolic = round(118 + wave * 5)
         diastolic = round(76 + slow_wave * 3)
         temperature = round(98.5 + slow_wave * 0.2, 1)
@@ -329,8 +378,6 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         "hrv": hrv,
         "hrv_baseline": 60,
         "spo2": spo2,
-        "sleep_hours": sleep_hours,
-        "sleep_performance": round(88 + slow_wave * 4),
         "BloodPressure": f"{systolic}/{diastolic}",
         "Temperature": temperature,
         "simulation_mode": mode,
@@ -345,30 +392,30 @@ def simulated_trajectory(mode: str, wave_seed: str) -> List[StatusTrajectoryPoin
 
     if mode == "high":
         points = [
+            ("-4h", -4.0, "medium", 52 + round(drift * 2)),
+            ("-2h", -2.0, "medium", 63 + round(drift * 2)),
             ("Now", 0.0, "high", 84 + round(drift * 3)),
-            ("30m", 0.5, "high", 89 + round(drift * 2)),
-            ("1h", 1.0, "high", 87 + round(drift * 2)),
-            ("2h", 2.0, "high", 92 + round(drift * 2)),
-            ("4h", 4.0, "high", 95 + round(drift * 2)),
-            ("6h", 6.0, "high", 97 + round(drift * 2)),
+            ("+2h", 2.0, "high", 92 + round(drift * 2)),
+            ("+4h", 4.0, "high", 95 + round(drift * 2)),
+            ("+6h", 6.0, "high", 97 + round(drift * 2)),
         ]
     elif mode == "medium":
         points = [
+            ("-4h", -4.0, "low", 22 + round(drift * 2)),
+            ("-2h", -2.0, "medium", 38 + round(drift * 2)),
             ("Now", 0.0, "medium", 47 + round(drift * 3)),
-            ("30m", 0.5, "medium", 51 + round(drift * 2)),
-            ("1h", 1.0, "medium", 55 + round(drift * 2)),
-            ("2h", 2.0, "medium", 58 + round(drift * 2)),
-            ("4h", 4.0, "medium", 63 + round(drift * 2)),
-            ("6h", 6.0, "high", 69 + round(drift * 3)),
+            ("+2h", 2.0, "medium", 58 + round(drift * 2)),
+            ("+4h", 4.0, "medium", 63 + round(drift * 2)),
+            ("+6h", 6.0, "high", 69 + round(drift * 3)),
         ]
     else:
         points = [
+            ("-4h", -4.0, "low", 18 + round(drift * 2)),
+            ("-2h", -2.0, "low", 16 + round(drift * 2)),
             ("Now", 0.0, "low", 14 + round(drift * 2)),
-            ("30m", 0.5, "low", 12 + round(drift * 2)),
-            ("1h", 1.0, "low", 15 + round(drift * 2)),
-            ("2h", 2.0, "low", 11 + round(drift * 2)),
-            ("4h", 4.0, "low", 10 + round(drift * 2)),
-            ("6h", 6.0, "low", 8 + round(drift * 2)),
+            ("+2h", 2.0, "low", 11 + round(drift * 2)),
+            ("+4h", 4.0, "low", 10 + round(drift * 2)),
+            ("+6h", 6.0, "low", 8 + round(drift * 2)),
         ]
 
     return [
@@ -623,6 +670,25 @@ def trigger_high_risk_once(patient_id: str, request: AnalyzeRequest, raw_vitals:
     )
 
 
+def notification_for_status(risk_level: str, anomaly_level: int, escalation: StatusEscalation) -> Optional[StatusNotification]:
+    if escalation.caregiverCallTriggered:
+        return StatusNotification(
+            type="caregiver_escalation",
+            title="Sova is contacting your caregiver",
+            message=escalation.reason or "A high-risk change was detected. We are notifying your caregiver now.",
+            requiresResponse=False,
+        )
+    if risk_level in {"medium", "high"} or anomaly_level >= 2:
+        return StatusNotification(
+            type="anomaly_check",
+            title="Is everything ok?",
+            message="Sova noticed a change in your health signals.",
+            requiresResponse=True,
+            actions=["Yes", "No"],
+        )
+    return None
+
+
 @app.post("/v1/patients/{patient_id}/simulation", response_model=SimulationModeResponse)
 async def set_patient_simulation(patient_id: str, request: SimulationModeRequest):
     mode = normalized_simulation_mode(request.mode)
@@ -686,7 +752,261 @@ async def patient_status(patient_id: str):
         escalation=escalation,
         deliberation=current_deliberation(patient_id),
         trajectory=simulated_trajectory(mode, patient_id),
+        notification=notification_for_status(risk_level, anomaly_level, escalation),
     )
+
+
+def call_context_summary(status: PatientStatusResponse, specialist: dict, profile: dict) -> str:
+    vitals = status.vitals
+    profile_parts = []
+    for key in ("Surgery", "DischargeDate", "Allergies", "CurrentMedications", "DateOfBirth", "Gender"):
+        value = profile.get(key)
+        if value:
+            profile_parts.append(f"{key}: {value}")
+    trajectory = ", ".join(f"{point.label} {point.riskLevel} {point.riskScore}" for point in status.trajectory)
+    return (
+        f"You are {specialist['name']}, specialty {specialist['specialty']}. "
+        f"Patient {status.patientId} has risk {status.riskLevel} with anomaly level {status.anomalyLevel}. "
+        f"Recommended action: {status.recommendedAction}. "
+        f"Vitals: heart rate {vitals.heartRate}, HRV {vitals.hrv}, SpO2 {vitals.spo2}, "
+        f"blood pressure {vitals.bloodPressure}, temperature {vitals.temperature}, sleep {vitals.sleepHours}. "
+        f"Trajectory: {trajectory}. "
+        f"Profile: {'; '.join(profile_parts) if profile_parts else 'not available'}. "
+        "Do not diagnose definitively. Give calm, short, practical guidance and advise urgent escalation for severe symptoms."
+    )
+
+
+def specialist_greeting(status: PatientStatusResponse, specialist: dict) -> str:
+    if status.riskLevel == "high":
+        return (
+            f"This is {specialist['name']}. I can see Sova marked this as high risk, "
+            "so I’ll keep this focused. Tell me what you feel right now."
+        )
+    if status.riskLevel in {"medium", "moderate"}:
+        return (
+            f"This is {specialist['name']}. I’m reviewing the signal that needs more context. "
+            "Tell me what changed or what feels confusing."
+        )
+    return (
+        f"This is {specialist['name']}. Your current signals look stable, "
+        "but I can help explain what Sova is watching."
+    )
+
+
+def llm_specialist_reply(context: str, user_text: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured for specialist voice calls.")
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=os.getenv("SOVA_SPECIALIST_MODEL", "gpt-4o-mini"),
+        messages=[
+            {"role": "system", "content": context},
+            {"role": "user", "content": user_text},
+        ],
+        max_tokens=140,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def maybe_tts_audio(text: str) -> Optional[str]:
+    if not os.getenv("ELEVENLABS_API_KEY"):
+        return None
+    try:
+        from claw.convo_elevenlabs import text_to_speech
+        audio = text_to_speech(text)
+        return base64.b64encode(audio).decode("ascii")
+    except Exception as exc:
+        print(f"Specialist call TTS failed: {exc}")
+        return None
+
+
+def pcm16_to_wav_bytes(pcm: bytes, sample_rate: int = 16_000) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
+    return output.getvalue()
+
+
+def specialist_reply_payload(session: dict, user_text: str) -> dict:
+    reply = llm_specialist_reply(session["context"], user_text)
+    audio = maybe_tts_audio(reply)
+    return {"text": reply, "audio": audio}
+
+
+@app.post("/v1/patients/{patient_id}/specialist-calls", response_model=SpecialistCallStartResponse)
+async def start_specialist_call(patient_id: str, request: SpecialistCallStartRequest):
+    specialist = specialist_by_id(request.specialistId)
+    status = await patient_status(patient_id)
+    profile = {}
+    if USE_BIGQUERY_VITALS:
+        try:
+            profile = get_patient_profile(patient_id)
+        except Exception as exc:
+            print(f"Unable to read specialist call profile for patientId={patient_id}: {exc}")
+
+    session_id = str(uuid.uuid4())
+    specialist_call_sessions[session_id] = {
+        "session_id": session_id,
+        "client_session_id": request.clientSessionId,
+        "patient_id": patient_id,
+        "specialist": specialist,
+        "status": status.model_dump(),
+        "context": call_context_summary(status, specialist, profile),
+        "audio_chunks": [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return SpecialistCallStartResponse(
+        sessionId=session_id,
+        websocketUrl=f"/v1/specialist-calls/{session_id}/stream",
+    )
+
+
+@app.websocket("/v1/specialist-calls/{session_id}/stream")
+async def specialist_call_stream(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    session = specialist_call_sessions.get(session_id)
+    if not session:
+        await websocket.send_json({"type": "session.error", "message": "Unknown specialist call session."})
+        await websocket.close()
+        return
+
+    patient_id = session["patient_id"]
+    specialist = session["specialist"]
+    status = PatientStatusResponse(**session["status"])
+    greeting = specialist_greeting(status, specialist)
+
+    await websocket.send_json({
+        "type": "session.started",
+        "sessionId": session_id,
+        "patientId": patient_id,
+        "specialistId": specialist["id"],
+        "specialistName": specialist["name"],
+    })
+    await websocket.send_json({
+        "type": "agent.transcript",
+        "sessionId": session_id,
+        "speaker": specialist["name"],
+        "text": greeting,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    })
+    audio = maybe_tts_audio(greeting)
+    if audio:
+        await websocket.send_json({
+            "type": "agent.audio",
+            "sessionId": session_id,
+            "format": "mp3",
+            "audioBase64": audio,
+        })
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"]:
+                continue
+            raw = message.get("text")
+            if raw is None:
+                continue
+            payload = json.loads(raw)
+            event_type = payload.get("type")
+            if event_type == "session.end":
+                await websocket.send_json({"type": "session.ended", "sessionId": session_id})
+                await websocket.close()
+                return
+            if event_type == "audio.chunk":
+                if not os.getenv("ELEVENLABS_API_KEY"):
+                    await websocket.send_json({
+                        "type": "session.error",
+                        "sessionId": session_id,
+                        "message": "ELEVENLABS_API_KEY is not configured for live speech recognition.",
+                    })
+                    continue
+                chunk = payload.get("audioBase64")
+                if chunk:
+                    session.setdefault("audio_chunks", []).append(base64.b64decode(chunk))
+                continue
+            if event_type == "audio.end":
+                if not session.get("audio_chunks"):
+                    continue
+                if not os.getenv("ELEVENLABS_API_KEY"):
+                    await websocket.send_json({
+                        "type": "session.error",
+                        "sessionId": session_id,
+                        "message": "ELEVENLABS_API_KEY is not configured for live speech recognition.",
+                    })
+                    session["audio_chunks"] = []
+                    continue
+                try:
+                    from claw.convo_elevenlabs import speech_to_text
+                    audio_bytes = b"".join(session.get("audio_chunks", []))
+                    session["audio_chunks"] = []
+                    if payload.get("format") == "pcm16":
+                        audio_bytes = pcm16_to_wav_bytes(audio_bytes)
+                        audio_format = "wav"
+                    else:
+                        audio_format = payload.get("format") or "ogg"
+                    user_text = speech_to_text(audio_bytes, audio_format=audio_format).strip()
+                except Exception as exc:
+                    await websocket.send_json({
+                        "type": "session.error",
+                        "sessionId": session_id,
+                        "message": f"Unable to transcribe audio: {exc}",
+                    })
+                    continue
+                if not user_text:
+                    continue
+                event_type = "user.transcript.final"
+                payload = {"text": user_text}
+            if event_type == "user.transcript.final":
+                user_text = (payload.get("text") or "").strip()
+                if not user_text:
+                    continue
+                await websocket.send_json({
+                    "type": "user.transcript.final",
+                    "sessionId": session_id,
+                    "speaker": "Patient",
+                    "text": user_text,
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                })
+                try:
+                    reply_payload = specialist_reply_payload(session, user_text)
+                except Exception as exc:
+                    await websocket.send_json({
+                        "type": "session.error",
+                        "sessionId": session_id,
+                        "message": str(exc),
+                    })
+                    continue
+                await websocket.send_json({
+                    "type": "agent.transcript",
+                    "sessionId": session_id,
+                    "speaker": specialist["name"],
+                    "text": reply_payload["text"],
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                })
+                audio = reply_payload["audio"]
+                if audio:
+                    await websocket.send_json({
+                        "type": "agent.audio",
+                        "sessionId": session_id,
+                        "format": "mp3",
+                        "audioBase64": audio,
+                    })
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        await websocket.send_json({
+            "type": "session.error",
+            "sessionId": session_id,
+            "message": str(exc),
+        })
 
 
 @app.post("/analyze")
