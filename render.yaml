@@ -16,3 +16,5 @@ services:
         sync: false
       - key: TWILIO_AUTH_TOKEN
         sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false

@@ -10,9 +10,12 @@ Tables (all in automaticbalancetransfer.sova):
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import date, datetime, timedelta
 
 from google.cloud import bigquery
+from google.oauth2 import service_account
 
 _PROJECT = "automaticbalancetransfer"
 _DATASET = "sova"
@@ -33,6 +36,11 @@ _STAGE_THRESHOLDS = [2, 7, 14, 30, 60]  # days since discharge → stage 0-5
 
 
 def _client() -> bigquery.Client:
+    credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if credentials_json:
+        credentials_info = json.loads(credentials_json)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        return bigquery.Client(project=_PROJECT, credentials=credentials)
     return bigquery.Client(project=_PROJECT)
 
 
