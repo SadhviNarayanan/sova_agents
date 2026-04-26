@@ -575,6 +575,23 @@ def current_deliberation(patient_id: str) -> StatusDeliberation:
     return StatusDeliberation()
 
 
+def clear_deliberation_state(patient_id: str):
+    debate_histories.pop(patient_id, None)
+    debate_status.pop(patient_id, None)
+    for subscriber in list(debate_subscribers.get(patient_id, [])):
+        subscriber.put_nowait({
+            "type": "done",
+            "event": "done",
+            "patient_id": patient_id,
+        })
+    debate_subscribers.pop(patient_id, None)
+
+
+def clear_all_deliberation_state():
+    for patient_id in list(debate_histories.keys() | debate_status.keys() | debate_subscribers.keys()):
+        clear_deliberation_state(patient_id)
+
+
 def safe_call_caregiver(payload: dict):
     try:
         call_caregiver(payload)
@@ -611,12 +628,13 @@ async def set_patient_simulation(patient_id: str, request: SimulationModeRequest
     mode = normalized_simulation_mode(request.mode)
     simulation_key = DEFAULT_SIMULATION_PATIENT_ID if patient_id in {"*", "all", "default"} else patient_id
     simulation_modes[simulation_key] = mode
-    if mode != "high":
-        with high_risk_lock:
-            if simulation_key == DEFAULT_SIMULATION_PATIENT_ID:
-                high_risk_episodes.clear()
-            else:
-                high_risk_episodes.pop(patient_id, None)
+    with high_risk_lock:
+        if simulation_key == DEFAULT_SIMULATION_PATIENT_ID:
+            high_risk_episodes.clear()
+            clear_all_deliberation_state()
+        else:
+            high_risk_episodes.pop(patient_id, None)
+            clear_deliberation_state(patient_id)
     return SimulationModeResponse(
         patientId=simulation_key,
         mode=mode,
