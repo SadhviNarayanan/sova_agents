@@ -2,11 +2,11 @@
 Telegram bot — text conversation interface for CareRelay.
 
 Each chat has its own session. Users send text messages and the bot
-replies via GPT-4o using the OpenAI key from config.json.
+replies via GPT-4o using the OpenAI key from the environment.
 
-Required config.json keys:
-    telegram.bot_token       — from @BotFather
-    backend.chat_api         — OpenAI API key
+Required environment variables:
+    TELEGRAM_BOT_TOKEN       — from @BotFather
+    OPENAI_API_KEY           — OpenAI API key
 
 Optional:
     TELEGRAM_ALLOWED_IDS env var — comma-separated chat IDs to whitelist
@@ -18,7 +18,6 @@ import logging
 import os
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from typing import Union
 
 from openai import OpenAI
@@ -54,12 +53,6 @@ def _session(chat_id: int) -> dict:
 # Backend API
 # ---------------------------------------------------------------------------
 
-def _load_config() -> dict:
-    path = Path(__file__).parent / "config.json"
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
 SYSTEM_PROMPT = (
     "You are CareRelay, a compassionate AI care assistant helping patients "
     "recover after a hospital stay. Keep responses concise, warm, and clinically "
@@ -69,9 +62,9 @@ SYSTEM_PROMPT = (
 
 
 def _get_openai_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY") or _load_config().get("backend", {}).get("chat_api")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise EnvironmentError("OpenAI API key not found in config.json or OPENAI_API_KEY env var.")
+        raise EnvironmentError("OPENAI_API_KEY env var is required.")
     return OpenAI(api_key=api_key)
 
 
@@ -161,11 +154,12 @@ def send_message(bot_token: str, chat_id: Union[str, int], text: str) -> dict:
         return json.loads(resp.read().decode())
 
 
-def send_message_from_config(message: str, config_path: Union[str, Path] = None) -> dict:
-    path = Path(config_path) if config_path else Path(__file__).parent / "config.json"
-    with open(path, encoding="utf-8") as f:
-        cfg = json.load(f).get("telegram", {})
-    return send_message(cfg["bot_token"], cfg["chat_id"], message)
+def send_message_from_env(message: str) -> dict:
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not bot_token or not chat_id:
+        raise EnvironmentError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars are required.")
+    return send_message(bot_token, chat_id, message)
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +167,9 @@ def send_message_from_config(message: str, config_path: Union[str, Path] = None)
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or _load_config().get("telegram", {}).get("bot_token")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise EnvironmentError("bot_token not found in config.json or TELEGRAM_BOT_TOKEN env var.")
+        raise EnvironmentError("TELEGRAM_BOT_TOKEN env var is required.")
 
     app = Application.builder().token(token).build()
 

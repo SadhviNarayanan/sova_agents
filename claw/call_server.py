@@ -8,12 +8,10 @@ Run:
     uvicorn call_server:app --port 8080
 Expose:
     ngrok http 8080
-Put ngrok URL in config.json → backend.webhook_url
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import os
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -26,9 +24,18 @@ _call_data: dict[str, dict] = {}
 
 
 def _load_config() -> dict:
-    path = Path(__file__).parent / "config.json"
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    return {
+        "patient": {
+            "name": os.getenv("SOVA_PATIENT_NAME", "Ved"),
+            "address": os.getenv("SOVA_PATIENT_ADDRESS", "unavailable"),
+            "conditions": [
+                item.strip()
+                for item in os.getenv("SOVA_PATIENT_CONDITIONS", "post-discharge recovery").split(",")
+                if item.strip()
+            ],
+            "caregiver_name": os.getenv("SOVA_CAREGIVER_NAME", "caregiver"),
+        }
+    }
 
 
 def _urgency(data: dict) -> str:

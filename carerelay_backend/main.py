@@ -16,8 +16,31 @@ import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta, timezone
+
 from carerelay_backend.agents import AGENT_PROMPTS
 import anthropic  # For Claude API integration
+
+def load_local_dotenv(path: str = ".env") -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path)
+        return
+    except Exception:
+        pass
+
+    env_path = os.path.join(os.getcwd(), path)
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_local_dotenv()
 
 # Add parent directory to path to import agentic_convo and langgraph_council
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -609,11 +632,14 @@ def start_debate_session(patient_id: str, request: AnalyzeRequest, loop: asyncio
             council = LangGraphMedicalCouncil(max_utterances=8, event_callback=on_event)
             council.orchestrate_debate(build_patient_dict(request), webhook_url=request.webhook_url)
         except Exception as exc:
+            message = str(exc)
+            if "GRAPH_RECURSION_LIMIT" in message or "recursion limit" in message.lower():
+                message = "The specialist council needed more time. Please retry."
             on_event({
                 "type": "error",
                 "event": "error",
                 "patient_id": patient_id,
-                "message": str(exc),
+                "message": message,
             })
 
     loop.run_in_executor(executor, run)

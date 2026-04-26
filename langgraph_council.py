@@ -544,7 +544,10 @@ class LangGraphMedicalCouncil:
             "webhook_url": webhook_url,
         }
 
-        final_state = self.graph.invoke(initial_state)
+        final_state = self.graph.invoke(
+            initial_state,
+            config={"recursion_limit": max(50, self.max_utterances * 8)},
+        )
 
         return {
             "debate_history": final_state["debate_history"],
