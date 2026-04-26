@@ -2,9 +2,8 @@
 heartbeat.py — continuous WHOOP-data polling loop, runs as a daemon thread.
 
 Each tick fetches the Whoop row identified by the composite key (user_id, timestamp),
-where timestamp = anchor + tick * interval.  Before each fetch, fix_timestamps()
-rewrites the DB so row N is always exactly at anchor + N * interval, keeping the
-two sides in sync.  severity and stage come from patientProfile (via query.py).
+where timestamp = anchor + tick * interval.  severity and stage come from
+patientProfile (via query.py).
 
 Entry points:
   start(user_id) — launch as a non-blocking background daemon thread (use this)
@@ -17,7 +16,7 @@ import json
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import requests
 
@@ -26,10 +25,10 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 from anomaly import infer_anomaly_level
 from call_twilio import call_911, call_caregiver, text_caregiver
 from db import log_anomaly_to_db
-from big_query import fix_timestamps, get_anchor, fetch_by_timestamp
+from big_query import get_anchor, fetch_by_timestamp
 from query import get_patient_profile
 
-DEBATE_BASE_URL = "http://localhost:8000"
+DEBATE_BASE_URL = "https://sova-agents.onrender.com"
 
 _thread: threading.Thread | None = None
 _stop_flag: bool = False
@@ -47,28 +46,37 @@ def calculate_polling_freq(severity: int, stage: int) -> float:
     return max(raw, _MIN_INTERVAL_MINUTES)
 
 
-def _trigger_debate(data: dict) -> None:
-    """POST to /start-debate, stream SSE results, then re-route using escalation_level."""
+def _trigger_debate(data: dict, interval: float = 0) -> None:
+    """POST to /start-debate, stream SSE results, then route using escalation_level."""
     patient_id = data.get("user_id", "unknown")
     profile = get_patient_profile(patient_id) or {}
 
     payload = {
-        "patient_id":       patient_id,
-        "age":              profile.get("age"),
-        "gender":           profile.get("gender"),
-        "diagnosis":        profile.get("conditions", []),
-        "heart_rate":       data.get("resting_heart_rate"),
-        "hrv":              data.get("hrv"),
-        "recovery_score":   data.get("recovery_score"),
-        "day_strain":       data.get("day_strain"),
-        "sleep_performance":data.get("sleep_performance"),
-        "respiratory_rate": data.get("respiratory_rate"),
-        "blood_pressure":   data.get("blood_pressure"),
-        "temperature":      data.get("skin_temp_deviation"),
-        "triggered_signals":data.get("triggered_signals", []),
-        "anomaly_level":    data.get("anomaly_level"),
-        "severity":         profile.get("severity"),
-        "stage":            profile.get("stage"),
+        # patient profile fields — pass through with BigQuery casing
+        "patientId":             patient_id,
+        "Age":                   profile.get("Age") or profile.get("age"),
+        "Gender":                profile.get("Gender") or profile.get("gender"),
+        "Surgery":               profile.get("Surgery") or profile.get("conditions", ""),
+        "DischargeDate":         str(profile.get("DischargeDate", "")),
+        "RiskLevel":             profile.get("RiskLevel"),
+        "BloodPressure":         profile.get("BloodPressure"),
+        "HeartRate":             profile.get("HeartRate"),
+        "Allergies":             profile.get("Allergies", "None"),
+        "CurrentMedications":    profile.get("CurrentMedications", ""),
+        "EmergencyContactName":  profile.get("EmergencyContactName", ""),
+        "EmergencyContactPhone": profile.get("EmergencyContactPhone", ""),
+        # derived
+        "severity":              profile.get("severity"),
+        "stage":                 profile.get("stage"),
+        "anomaly_level":         data.get("anomaly_level"),
+        "interval":              interval,
+        # current wearable readings nested under vitals
+        "vitals": {
+            "HeartRate":    data.get("resting_heart_rate"),
+            "BloodPressure": data.get("blood_pressure"),
+            "Temperature":  data.get("skin_temp_deviation"),
+            "TimeStamp":    data.get("date"),
+        },
     }
 
     try:
@@ -77,42 +85,38 @@ def _trigger_debate(data: dict) -> None:
         print(f"[debate] POST /start-debate failed: {exc}")
         return
 
+    _URGENCY_TO_LEVEL = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
     try:
         with requests.get(f"{DEBATE_BASE_URL}/stream/{patient_id}", stream=True, timeout=120) as resp:
-            event_type = None
             for raw in resp.iter_lines():
                 if not raw:
-                    event_type = None
                     continue
                 line = raw.decode() if isinstance(raw, bytes) else raw
-                if line.startswith("event:"):
-                    event_type = line[len("event:"):].strip()
-                elif line.startswith("data:"):
-                    payload_str = line[len("data:"):].strip()
-                    if event_type == "agent_speak":
-                        try:
-                            msg = json.loads(payload_str)
-                            print(f"[debate] {msg.get('agent')}: {msg.get('statement')}")
-                        except json.JSONDecodeError:
-                            pass
-                    elif event_type == "decision":
-                        try:
-                            decision = json.loads(payload_str)
-                            level = int(decision.get("escalation_level", 0))
-                            print(f"[debate] decision → escalation_level={level}")
-                            if level == 4:
-                                _fire(call_911, data)
-                            elif level == 3:
-                                _fire(call_caregiver, data)
-                            elif level == 2:
-                                _fire(text_caregiver, data)
-                            elif level == 1:
-                                _fire(_log_anomaly, data, level)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                    elif event_type == "error":
-                        print(f"[debate] stream error: {payload_str}")
-                        return
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    msg = json.loads(line[len("data:"):].strip())
+                except json.JSONDecodeError:
+                    continue
+
+                kind = msg.get("type")
+                if kind == "agent":
+                    print(f"[debate] {msg.get('agent')} (r{msg.get('round')}): {msg.get('statement')}")
+                elif kind == "decision":
+                    urgency = msg.get("urgency_level", "low")
+                    level = _URGENCY_TO_LEVEL.get(urgency, 1)
+                    print(f"[debate] decision → urgency={urgency} action={msg.get('immediate_action')}")
+                    if level == 4:
+                        _fire(call_911, data)
+                    elif level == 3:
+                        _fire(call_caregiver, data)
+                    elif level == 2:
+                        _fire(text_caregiver, data)
+                    elif level == 1:
+                        _fire(_log_anomaly, data, level)
+                elif kind == "done":
+                    return
     except Exception as exc:
         print(f"[debate] stream error: {exc}")
 
@@ -124,30 +128,6 @@ def _log_anomaly(data: dict, level: int) -> None:
 def _fire(fn, *args) -> None:
     """Spawn fn(*args) in a detached thread so the heartbeat loop never blocks on it."""
     threading.Thread(target=fn, args=args, daemon=False).start()
-
-
-def process(data: dict, anomaly: int) -> None:
-    uid      = data.get("user_id", "unknown")
-    ts       = data.get("date", datetime.now(timezone.utc).isoformat())
-    recovery = data.get("recovery_score")
-    hrv      = data.get("hrv")
-    rhr      = data.get("resting_heart_rate")
-    strain   = data.get("day_strain")
-    sleep_p  = data.get("sleep_performance")
-
-    print(f"[{ts}] {uid}  recovery={recovery}  hrv={hrv}  rhr={rhr}  strain={strain}  sleep={sleep_p}%")
-
-    if anomaly == 4:
-        _fire(call_911, data)
-    elif anomaly == 3:
-        _fire(call_caregiver, data)
-    elif anomaly == 2:
-        _fire(text_caregiver, data)
-    elif anomaly == 1:
-        _fire(_log_anomaly, data, anomaly)
-
-    if anomaly >= 2:
-        _fire(_trigger_debate, data)
 
 
 def run(user_id: str, max_ticks: int | None = None) -> None:
@@ -169,25 +149,28 @@ def run(user_id: str, max_ticks: int | None = None) -> None:
         stage    = profile["stage"]
         interval = calculate_polling_freq(severity, stage)
 
-        
         if anchor is None:
-            anchor = get_anchor(user_id) #base timestamp
+            anchor = get_anchor(user_id)
             if anchor is None:
                 print(f"No Whoop data found for {user_id} — stopping heartbeat")
                 break
 
-        # 3. Derive the exact timestamp for this tick and fetch that row
+        # 2. Derive the exact timestamp for this tick and fetch that row
         expected_ts = anchor + timedelta(minutes=tick * interval)
         data = fetch_by_timestamp(user_id, expected_ts)
         if not data:
             print(f"No Whoop row at tick={tick} ts={expected_ts.isoformat()} — stopping heartbeat")
             break
 
-        # 4. Score anomaly and route
+        # 3. Score anomaly and trigger debate
         anomaly = infer_anomaly_level(data)
         data["anomaly_level"] = anomaly
 
-        process(data, anomaly)
+        ts = data.get("date", datetime.now().isoformat())
+        print(f"[{ts}] {user_id}  recovery={data.get('recovery_score')}  hrv={data.get('hrv')}  rhr={data.get('resting_heart_rate')}  strain={data.get('day_strain')}  sleep={data.get('sleep_performance')}%")
+
+        if anomaly > 0:
+            _fire(_trigger_debate, data, interval)
         print(f"   next poll in {interval:.0f}min  (severity={severity}, stage={stage}, anomaly={anomaly})\n")
 
         tick += 1
