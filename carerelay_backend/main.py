@@ -804,6 +804,11 @@ def specialist_log(event: str, **metadata):
     )
 
 
+def log_preview(text: str, limit: int = 140) -> str:
+    compact = " ".join(text.split())
+    return compact[:limit]
+
+
 def specialist_greeting(status: PatientStatusResponse, specialist: dict) -> str:
     return f"Hi, I’m {specialist['name']}, how are you doing?"
 
@@ -1092,6 +1097,16 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     session["audio_chunk_count"] = 0
                     session["audio_byte_count"] = 0
                     if payload.get("format") == "pcm16":
+                        audio_seconds = len(audio_bytes) / 32_000
+                        if audio_seconds < 0.65:
+                            specialist_log(
+                                "audio.turn.too_short",
+                                patientId=patient_id,
+                                specialistId=specialist["id"],
+                                sessionId=session_id,
+                                audioSeconds=round(audio_seconds, 2),
+                            )
+                            continue
                         audio_bytes = pcm16_to_wav_bytes(audio_bytes)
                         audio_format = "wav"
                     else:
@@ -1120,6 +1135,7 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     specialistId=specialist["id"],
                     sessionId=session_id,
                     textChars=len(user_text),
+                    textPreview=log_preview(user_text),
                 )
                 try:
                     reply_payload = specialist_reply_payload(session, user_text)
@@ -1137,6 +1153,7 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                     specialistId=specialist["id"],
                     sessionId=session_id,
                     textChars=len(reply_payload["text"]),
+                    textPreview=log_preview(reply_payload["text"]),
                 )
                 audio = reply_payload["audio"]
                 await websocket.send_json({
