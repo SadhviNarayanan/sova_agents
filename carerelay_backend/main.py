@@ -822,16 +822,20 @@ def call_context_summary(status: PatientStatusResponse, specialist: dict, profil
     vitals = status.vitals
     profile_parts = compact_profile_parts(profile)
     trajectory = ", ".join(f"{point.label} {point.riskLevel} {point.riskScore}" for point in status.trajectory)
+    specialist_scope = specialist.get("system_prompt") or ""
     return (
         f"You are {specialist['name']}, specialty {specialist['specialty']}. "
+        f"Specialty instructions: {specialist_scope} "
         f"Patient {status.patientId} has risk {status.riskLevel} with anomaly level {status.anomalyLevel}. "
         f"Recommended action: {status.recommendedAction}. "
         f"Vitals: heart rate {vitals.heartRate}, HRV {vitals.hrv}, SpO2 {vitals.spo2}, "
         f"blood pressure {vitals.bloodPressure}, temperature {vitals.temperature}, sleep {vitals.sleepHours}. "
         f"Trajectory: {trajectory}. "
         f"Profile: {'; '.join(profile_parts) if profile_parts else 'not available'}. "
-        "Do not diagnose definitively. Reply in one short spoken sentence unless the patient asks for detail. "
-        "Advise urgent escalation for severe symptoms."
+        "Conversation rule: do not say only that vitals are bad or that you do not know what is going on. "
+        "Use your specialty to explain the most likely concern from the available context, name one concrete thing you are checking, "
+        "and give one practical next step or one targeted question. Do not diagnose definitively. "
+        "Reply in one or two short spoken sentences unless the patient asks for detail. Advise urgent escalation only for severe symptoms."
     )
 
 
@@ -868,7 +872,7 @@ def llm_specialist_reply(context: str, user_text: str) -> str:
 
     started = time.perf_counter()
     model = os.getenv("SOVA_SPECIALIST_MODEL", "gpt-4o-mini")
-    max_tokens = int(os.getenv("SOVA_SPECIALIST_MAX_TOKENS", "80"))
+    max_tokens = int(os.getenv("SOVA_SPECIALIST_MAX_TOKENS", "110"))
     temperature = float(os.getenv("SOVA_SPECIALIST_TEMPERATURE", "0.2"))
     timeout_seconds = float(os.getenv("SOVA_OPENAI_TIMEOUT_SECONDS", "8"))
     specialist_log("llm.request.started", textChars=len(user_text), model=model, maxTokens=max_tokens)
@@ -878,7 +882,7 @@ def llm_specialist_reply(context: str, user_text: str) -> str:
         messages=[
             {
                 "role": "system",
-                "content": context + " Keep every response under 18 words and sound natural on a phone call.",
+                "content": context + " Keep every response under 35 words, specific to your specialty, and natural on a phone call.",
             },
             {"role": "user", "content": user_text},
         ],
