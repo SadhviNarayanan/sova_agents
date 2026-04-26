@@ -360,6 +360,7 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         heart_rate = round(126 + wave * 6)
         hrv = round(25 + slow_wave * 4)
         spo2 = round(88 + oxygen_wave)
+        sleep_hours = 4.3
         systolic = round(164 + wave * 8)
         diastolic = round(102 + slow_wave * 5)
         temperature = round(102.1 + slow_wave * 0.4, 1)
@@ -367,6 +368,7 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         heart_rate = round(106 + wave * 4)
         hrv = round(42 + slow_wave * 4)
         spo2 = round(94 + max(-1, min(1, oxygen_wave)))
+        sleep_hours = 5.8
         systolic = round(142 + wave * 6)
         diastolic = round(90 + slow_wave * 4)
         temperature = round(100.5 + slow_wave * 0.2, 1)
@@ -374,6 +376,7 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         heart_rate = round(76 + wave * 5 + ((seed % 5) - 2))
         hrv = round(60 + slow_wave * 6)
         spo2 = round(98 + max(-1, min(1, oxygen_wave)))
+        sleep_hours = 7.3
         systolic = round(118 + wave * 5)
         diastolic = round(76 + slow_wave * 3)
         temperature = round(98.5 + slow_wave * 0.2, 1)
@@ -386,6 +389,8 @@ def simulated_vitals_row(patient_id: str, mode: str = "low") -> dict:
         "hrv": hrv,
         "hrv_baseline": 60,
         "spo2": spo2,
+        "sleep_hours": sleep_hours,
+        "sleep_performance": round((sleep_hours / 8.0) * 100),
         "BloodPressure": f"{systolic}/{diastolic}",
         "Temperature": temperature,
         "simulation_mode": mode,
