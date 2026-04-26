@@ -130,6 +130,7 @@ class SpecialistResponse(BaseModel):
 class SpecialistCallStartRequest(BaseModel):
     specialistId: str
     clientSessionId: str
+    patientContext: Optional[Dict[str, Any]] = None
 
 class SpecialistCallStartResponse(BaseModel):
     sessionId: str
@@ -769,13 +770,56 @@ async def patient_status(patient_id: str):
     )
 
 
+def normalized_profile_context(raw: Optional[dict]) -> dict:
+    if not raw:
+        return {}
+
+    def first_value(*keys: str):
+        for key in keys:
+            value = raw.get(key)
+            if value not in (None, "", [], {}):
+                return value
+        return None
+
+    normalized = {
+        "Age": first_value("age", "Age"),
+        "Gender": first_value("gender", "Gender", "sex", "Sex"),
+        "DateOfBirth": first_value("dateOfBirth", "DateOfBirth", "dob"),
+        "Address": first_value("address", "Address"),
+        "Surgery": first_value("surgery", "Surgery"),
+        "DischargeDate": first_value("dischargeDate", "DischargeDate"),
+        "Allergies": first_value("allergies", "Allergies"),
+        "CurrentMedications": first_value("currentMedications", "CurrentMedications", "medications"),
+        "EmergencyContactName": first_value("emergencyContactName", "EmergencyContactName"),
+        "EmergencyContactPhone": first_value("emergencyContactPhone", "EmergencyContactPhone"),
+        "DoctorPhoneNumber": first_value("doctorPhoneNumber", "DoctorPhoneNumber"),
+    }
+    return {key: value for key, value in normalized.items() if value not in (None, "", [], {})}
+
+
+def compact_profile_parts(profile: dict) -> list[str]:
+    labels = {
+        "Age": "age",
+        "Gender": "gender",
+        "DateOfBirth": "DOB",
+        "Surgery": "surgery",
+        "DischargeDate": "discharged",
+        "Allergies": "allergies",
+        "CurrentMedications": "medications",
+        "EmergencyContactName": "emergency contact",
+        "DoctorPhoneNumber": "caregiver phone",
+    }
+    parts = []
+    for key in ("Age", "Gender", "DateOfBirth", "Surgery", "DischargeDate", "Allergies", "CurrentMedications", "EmergencyContactName", "DoctorPhoneNumber"):
+        value = profile.get(key)
+        if value and str(value).lower() != "none":
+            parts.append(f"{labels[key]}: {value}")
+    return parts
+
+
 def call_context_summary(status: PatientStatusResponse, specialist: dict, profile: dict) -> str:
     vitals = status.vitals
-    profile_parts = []
-    for key in ("Surgery", "DischargeDate", "Allergies", "CurrentMedications", "DateOfBirth", "Gender"):
-        value = profile.get(key)
-        if value:
-            profile_parts.append(f"{key}: {value}")
+    profile_parts = compact_profile_parts(profile)
     trajectory = ", ".join(f"{point.label} {point.riskLevel} {point.riskScore}" for point in status.trajectory)
     return (
         f"You are {specialist['name']}, specialty {specialist['specialty']}. "
@@ -956,21 +1000,32 @@ def specialist_reply_payload(session: dict, user_text: str) -> dict:
 async def start_specialist_call(patient_id: str, request: SpecialistCallStartRequest):
     specialist = specialist_by_id(request.specialistId)
     status = await patient_status(patient_id)
-    profile = {}
-    if USE_BIGQUERY_VITALS:
+    profile = normalized_profile_context(request.patientContext)
+    if not profile and USE_BIGQUERY_VITALS:
         try:
-            profile = get_patient_profile(patient_id)
+            profile = normalized_profile_context(get_patient_profile(patient_id))
         except Exception as exc:
             print(f"Unable to read specialist call profile for patientId={patient_id}: {exc}")
 
     session_id = str(uuid.uuid4())
+    context = call_context_summary(status, specialist, profile)
+    specialist_log(
+        "context.built",
+        patientId=patient_id,
+        specialistId=specialist["id"],
+        sessionId=session_id,
+        hasProfile=bool(profile),
+        hasVitals=bool(status.vitals),
+        riskLevel=status.riskLevel,
+        contextChars=len(context),
+    )
     specialist_call_sessions[session_id] = {
         "session_id": session_id,
         "client_session_id": request.clientSessionId,
         "patient_id": patient_id,
         "specialist": specialist,
         "status": status.model_dump(),
-        "context": call_context_summary(status, specialist, profile),
+        "context": context,
         "audio_chunks": [],
         "audio_chunk_count": 0,
         "audio_byte_count": 0,
