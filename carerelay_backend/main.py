@@ -71,6 +71,7 @@ class Vitals(BaseModel):
 class StatusVitals(BaseModel):
     heartRate: Optional[int] = None
     hrv: Optional[int] = None
+    spo2: Optional[int] = None
     sleepHours: Optional[float] = None
     bloodPressure: Optional[str] = None
     temperature: Optional[float] = None
@@ -238,6 +239,7 @@ def status_vitals_from_row(patient_id: str, raw: dict) -> StatusVitals:
     return StatusVitals(
         heartRate=_int_or_none(_value(raw, "heartRate", "HeartRate", "resting_heart_rate", "rhr")),
         hrv=_int_or_none(_value(raw, "hrv", "HRV")),
+        spo2=_int_or_none(_value(raw, "spo2", "SpO2", "SPO2", "oxygen", "Oxygen")),
         sleepHours=_float_or_none(_value(raw, "sleepHours", "sleep_hours", "SleepHours")),
         bloodPressure=_string_or_none(_value(raw, "bloodPressure", "BloodPressure", "blood_pressure")),
         temperature=_float_or_none(_value(raw, "temperature", "Temperature")),
@@ -291,6 +293,15 @@ def simple_vitals_anomaly(vitals: StatusVitals) -> int:
                     level = max(level, 4)
                 elif systolic >= 160 or diastolic >= 100:
                     level = max(level, 3)
+                elif systolic >= 140 or diastolic >= 90:
+                    level = max(level, 2)
+    if vitals.spo2 is not None:
+        if vitals.spo2 < 90:
+            level = max(level, 4)
+        elif vitals.spo2 < 92:
+            level = max(level, 3)
+        elif vitals.spo2 < 95:
+            level = max(level, 2)
     return level
 
 
