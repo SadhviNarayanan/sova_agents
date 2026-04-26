@@ -8,6 +8,10 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
     env:
       OPENAI_API_KEY: dummy
       ANTHROPIC_API_KEY: dummy
@@ -22,7 +26,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: carerelay_backend/requirements.txt
 

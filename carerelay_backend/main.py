@@ -17,7 +17,6 @@ import anthropic  # For Claude API integration
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agentic_convo import MedicalCouncilOrchestrator
 from langgraph_council import LangGraphMedicalCouncil
-from claw.anomaly import infer_anomaly_level
 from claw.call_twilio import call_caregiver
 from claw.query import get_latest_vitals, get_patient_profile
 
@@ -306,7 +305,12 @@ def simple_vitals_anomaly(vitals: StatusVitals) -> int:
 
 
 def infer_patient_anomaly(patient_id: str, raw: dict, vitals: StatusVitals) -> int:
-    model_level = infer_anomaly_level(anomaly_snapshot(patient_id, raw, vitals))
+    model_level = 0
+    try:
+        from claw.anomaly import infer_anomaly_level
+        model_level = infer_anomaly_level(anomaly_snapshot(patient_id, raw, vitals))
+    except Exception as exc:
+        print(f"Unable to run ML anomaly scorer for patientId={patient_id}; using vitals rules only. {exc}")
     return max(model_level, simple_vitals_anomaly(vitals))
 
 
