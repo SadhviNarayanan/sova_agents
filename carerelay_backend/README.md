@@ -1,94 +1,123 @@
-# CareRelay Backend
+# Sova
 
-AI-powered post-hospital care monitoring system with **conversational multi-agent council**.
+> AI doctor council that monitors patients after hospital discharge and decides in real time whether they need emergency care.
 
-## Features
+## Team
 
-- **Vitals Ingestion**: Collect data from Apple HealthKit/Fitbit
-- **Voice Check-ins**: Natural conversation via ElevenLabs
-- **Risk Simulation**: Clinical reasoning with IFM K2 Think V2
-- **🤖 Agent Council**: **7 specialist agents debate conversationally until convergence**
-- **Automated Escalation**: Twilio SMS/calls based on council decisions
+- Sadhvi Narayanan
+- Ishita Jain
+- Ved Panse
+- Varshini Vijay
 
-## The Agent Council System
+---
 
-Unlike simple AI responses, CareRelay features a **multi-round conversational debate** between specialist agents:
+## What We're Building
 
-- **7 Medical Specialists**: Cardiologist, Surgeon, Pharmacist, Nutritionist, General Physician, OBGYN, Critical Care
-- **Conversational Debate**: Agents respond to each other, agree/disagree, ask for clarification
-- **Convergence Detection**: Debate continues until consensus is reached or max rounds hit
-- **Memory & Context**: Each agent remembers previous statements and patient history
-- **Dynamic Speaking Order**: Agents speak based on confidence, disagreements, and urgency
+Patients discharged from hospital enter a dangerous gap — no continuous monitoring, no specialist oversight, and a follow-up appointment days away. Sova fills that gap.
 
-### Example Council Debate:
+When a patient's wearable detects an anomaly, Sova automatically convenes a council of AI specialist doctors. They debate the patient's vitals, medications, surgery history, and risk level in real time, then issue a single decision: **Call 911, call caregiver, text caregiver, initiate conversation, or do nothing.**
+
+Every decision is calibrated — not every elevated heart rate is an emergency. The council argues about it first.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Agent orchestration | LangGraph (StateGraph) |
+| LLM | OpenAI GPT-4o-mini |
+| Backend | FastAPI (Python) |
+| Real-time streaming | Server-Sent Events (SSE) |
+| Voice calls | Twilio + ElevenLabs |
+| Wearable data | WHOOP via BigQuery |
+| Database | Google BigQuery |
+| Deployment | Render |
+
+---
+
+## How It Works
+
+1. **Wearable detects anomaly** — heartbeat monitor computes `anomaly_level` (0–4) from live vitals
+2. **Council is convened** — LangGraph dynamically selects the relevant specialists for this patient's case
+3. **Specialists debate** — each agent speaks in turn, responds to each other, challenges assumptions
+4. **Convergence** — when the council agrees, a facilitator synthesizes the debate into a structured decision
+5. **Dispatch** — decision fires to the frontend via SSE stream and to OpenClaw via webhook
+
+### Specialist Roster
+Cardiologist, Critical Care, Pulmonologist, Hematologist, Nephrologist, Pharmacist, Physiotherapist, General Physician, Nutritionist, OB/GYN — assembled per-patient based on their specific case.
+
+---
+
+## API
+
+### Start a debate (async)
+```bash
+curl -X POST 'https://sova-agents.onrender.com/start-debate/{patientId}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "patientId": "CR-002",
+    "Age": 72,
+    "Gender": "male",
+    "Surgery": "CABG",
+    "DischargeDate": "2026-04-20",
+    "RiskLevel": "High",
+    "CurrentMedications": "Furosemide 40mg, Spironolactone 25mg",
+    "severity": 2,
+    "stage": 1,
+    "vitals": { "HeartRate": 112, "BloodPressure": "152/94", "Temperature": 98.8 },
+    "anomaly_level": 3,
+    "webhook_url": "https://your-system.com/callback"
+  }'
 ```
-🔄 ROUND 1
-👨‍⚕️ Dr. Elena Vasquez (Cardiology):
-   📋 Assessment: Heart rate elevated, concerning post-MI
-   💊 Recommendation: Immediate cardiology follow-up
-   ❌ Disagrees with: Dr. Marcus Chen
+Returns immediately. Final decision POSTed to `webhook_url` when debate completes.
 
-👨‍⚕️ Dr. Marcus Chen (Pharmacy):
-   📋 Assessment: Medication non-compliance likely cause
-   💊 Recommendation: Reinforce medication adherence first
-   ✅ Agrees with: Dr. Elena Vasquez on monitoring needs
+### Watch the debate live (SSE)
+```bash
+curl -N 'https://sova-agents.onrender.com/stream/{patientId}'
+```
+Doctor messages arrive one by one. Connect before or after the debate starts — stream waits up to 5 minutes.
 
-🔄 ROUND 2
-👨‍⚕️ Dr. Elena Vasquez (Cardiology):
-   📋 Assessment: Acknowledge medication factor, but cardiac risk remains high
-   💊 Recommendation: Medication + telehealth within 2 hours
-   ✅ Agrees with: Dr. Marcus Chen on medication priority
+### Blocking call (get result directly)
+```bash
+curl -X POST 'https://sova-agents.onrender.com/analyze' \
+  -H 'Content-Type: application/json' -d @payload.json
+```
+Blocks ~30–60s, returns full decision JSON.
+
+### Webhook response payload
+```json
+{
+  "event": "decision",
+  "patient_id": "CR-002",
+  "immediate_action": "Call caregiver",
+  "decision": "...",
+  "doctor_report": "...",
+  "urgency_level": "high",
+  "confidence_score": 0.87,
+  "action_items": [...]
+}
 ```
 
-## API Endpoints
+---
 
-- `POST /ingest_vitals/{patient_id}` - Wearable data ingestion
-- `POST /voice_checkin/{patient_id}` - Voice conversation processing
-- `POST /simulate_risk/{patient_id}` - Risk trajectory analysis
-- `POST /council_debate/{patient_id}` - **Full agent council debate**
-- `POST /escalate/{patient_id}` - Automated alerts
+## Local Setup
 
-## Setup
-
-1. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Set environment variables:
-```bash
-export OPENAI_API_KEY="your-openai-key"
-export ANTHROPIC_API_KEY="your-claude-key"  # For council debates
-export ELEVENLABS_API_KEY="your-elevenlabs-key"  # For voice
-export TWILIO_ACCOUNT_SID="your-twilio-sid"
-export TWILIO_AUTH_TOKEN="your-twilio-token"
+Environment variables:
+```
+OPENAI_API_KEY
+ANTHROPIC_API_KEY
+ELEVENLABS_API_KEY
+TWILIO_ACCOUNT_SID
+TWILIO_AUTH_TOKEN
+GOOGLE_APPLICATION_CREDENTIALS_JSON
 ```
 
-3. Run the demo:
+Run locally:
 ```bash
-python demo_council.py
+cd Sova_backend && python main.py
 ```
-
-4. Run the API server:
-```bash
-python main.py
-```
-
-## Architecture
-
-- `main.py` - FastAPI server with agent council integration
-- `agents.py` - Specialist agent prompts and configurations
-- `voice_checkin.py` - ElevenLabs conversation scripts
-- `demo_council.py` - Interactive agent council demonstration
-- `agentic_convo.py` - Core conversational orchestration engine
-
-## Integration Points
-
-- **OpenAI GPT-4**: Agent reasoning and debate responses
-- **ElevenLabs**: Voice synthesis and processing
-- **IFM K2 Think V2**: Risk simulation (planned)
-- **Twilio**: SMS/call escalation
-- **Auth0**: Authentication (planned)
-- **IFM K2 Think V2**: Risk simulation (planned)
-- **Twilio**: SMS/call escalation
-- **Auth0**: Authentication (planned)
