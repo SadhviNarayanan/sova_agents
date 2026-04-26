@@ -12,7 +12,6 @@ Entry points:
 
 from __future__ import annotations
 
-import json
 import sys
 import threading
 import time
@@ -47,12 +46,11 @@ def calculate_polling_freq(severity: int, stage: int) -> float:
 
 
 def _trigger_debate(data: dict, interval: float = 0) -> None:
-    """POST to /start-debate, stream SSE results, then route using escalation_level."""
+    """POST to /analyze (blocking), then route using escalation_level from the response."""
     patient_id = data.get("user_id", "unknown")
     profile = get_patient_profile(patient_id) or {}
 
     payload = {
-        # patient profile fields — pass through with BigQuery casing
         "patientId":             patient_id,
         "Age":                   profile.get("Age") or profile.get("age"),
         "Gender":                profile.get("Gender") or profile.get("gender"),
@@ -65,60 +63,37 @@ def _trigger_debate(data: dict, interval: float = 0) -> None:
         "CurrentMedications":    profile.get("CurrentMedications", ""),
         "EmergencyContactName":  profile.get("EmergencyContactName", ""),
         "EmergencyContactPhone": profile.get("EmergencyContactPhone", ""),
-        # derived
         "severity":              profile.get("severity"),
         "stage":                 profile.get("stage"),
         "anomaly_level":         data.get("anomaly_level"),
         "interval":              interval,
-        # current wearable readings nested under vitals
         "vitals": {
-            "HeartRate":    data.get("resting_heart_rate"),
+            "HeartRate":     data.get("resting_heart_rate"),
             "BloodPressure": data.get("blood_pressure"),
-            "Temperature":  data.get("skin_temp_deviation"),
-            "TimeStamp":    data.get("date"),
+            "Temperature":   data.get("skin_temp_deviation"),
+            "TimeStamp":     data.get("date"),
         },
     }
 
     try:
-        requests.post(f"{DEBATE_BASE_URL}/start-debate/{patient_id}", json=payload, timeout=10)
+        resp = requests.post(f"{DEBATE_BASE_URL}/analyze", json=payload, timeout=120)
+        resp.raise_for_status()
+        result = resp.json()
     except Exception as exc:
-        print(f"[debate] POST /start-debate failed: {exc}")
+        print(f"[debate] POST /analyze failed: {exc}")
         return
 
-    _URGENCY_TO_LEVEL = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    level = result.get("escalation_level", 1)
+    print(f"[debate] decision → urgency={result.get('urgency_level')} action={result.get('immediate_action')} level={level}")
 
-    try:
-        with requests.get(f"{DEBATE_BASE_URL}/stream/{patient_id}", stream=True, timeout=120) as resp:
-            for raw in resp.iter_lines():
-                if not raw:
-                    continue
-                line = raw.decode() if isinstance(raw, bytes) else raw
-                if not line.startswith("data:"):
-                    continue
-                try:
-                    msg = json.loads(line[len("data:"):].strip())
-                except json.JSONDecodeError:
-                    continue
-
-                kind = msg.get("type")
-                if kind == "agent":
-                    print(f"[debate] {msg.get('agent')} (r{msg.get('round')}): {msg.get('statement')}")
-                elif kind == "decision":
-                    urgency = msg.get("urgency_level", "low")
-                    level = _URGENCY_TO_LEVEL.get(urgency, 1)
-                    print(f"[debate] decision → urgency={urgency} action={msg.get('immediate_action')}")
-                    if level == 4:
-                        _fire(call_911, data)
-                    elif level == 3:
-                        _fire(call_caregiver, data)
-                    elif level == 2:
-                        _fire(text_caregiver, data)
-                    elif level == 1:
-                        _fire(_log_anomaly, data, level)
-                elif kind == "done":
-                    return
-    except Exception as exc:
-        print(f"[debate] stream error: {exc}")
+    if level == 4:
+        _fire(call_911, data)
+    elif level == 3:
+        _fire(call_caregiver, data)
+    elif level == 2:
+        _fire(text_caregiver, data)
+    else:
+        _fire(_log_anomaly, data, level)
 
 
 def _log_anomaly(data: dict, level: int) -> None:
@@ -169,7 +144,10 @@ def run(user_id: str, max_ticks: int | None = None) -> None:
         ts = data.get("date", datetime.now().isoformat())
         print(f"[{ts}] {user_id}  recovery={data.get('recovery_score')}  hrv={data.get('hrv')}  rhr={data.get('resting_heart_rate')}  strain={data.get('day_strain')}  sleep={data.get('sleep_performance')}%")
 
-        if anomaly > 0:
+        #copilot
+        if anomaly == 4:
+            _fire(call_caregiver, data)
+        elif anomaly > 0:
             _fire(_trigger_debate, data, interval)
         print(f"   next poll in {interval:.0f}min  (severity={severity}, stage={stage}, anomaly={anomaly})\n")
 
