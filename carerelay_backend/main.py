@@ -955,6 +955,36 @@ def transcribe_audio(audio: bytes, audio_format: str) -> str:
     return openai_transcribe_audio(audio, audio_format)
 
 
+async def transcribe_audio_turn(audio: bytes, audio_format: str) -> str:
+    timeout_seconds = float(os.getenv("SOVA_STT_TIMEOUT_SECONDS", "12"))
+    started = time.perf_counter()
+    specialist_log(
+        "stt.turn.started",
+        audioBytes=len(audio),
+        audioFormat=audio_format,
+        timeoutSeconds=timeout_seconds,
+    )
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(transcribe_audio, audio, audio_format),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        specialist_log(
+            "stt.turn.timeout",
+            audioBytes=len(audio),
+            audioFormat=audio_format,
+            durationMs=round((time.perf_counter() - started) * 1000),
+        )
+        raise RuntimeError("Speech recognition timed out.")
+    specialist_log(
+        "stt.turn.finished",
+        textChars=len(text.strip()),
+        durationMs=round((time.perf_counter() - started) * 1000),
+    )
+    return text
+
+
 def openai_tts_audio(text: str) -> Optional[dict]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -1347,7 +1377,7 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                         audio_format = "wav"
                     else:
                         audio_format = payload.get("format") or "ogg"
-                    user_text = transcribe_audio(audio_bytes, audio_format=audio_format).strip()
+                    user_text = (await transcribe_audio_turn(audio_bytes, audio_format=audio_format)).strip()
                 except Exception as exc:
                     specialist_log("stt.request.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
                     await send_spoken_status("I did not catch that clearly. Could you say that once more?", "stt_failed")
