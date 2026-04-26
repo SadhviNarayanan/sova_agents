@@ -345,22 +345,29 @@ def simulated_trajectory(mode: str, wave_seed: str) -> List[StatusTrajectoryPoin
     if mode == "high":
         points = [
             ("Now", 0.0, "high", 84 + round(drift * 3)),
-            ("30m", 0.5, "high", 88 + round(drift * 2)),
-            ("2h", 2.0, "high", 91 + round(drift * 2)),
-            ("6h", 6.0, "high", 94 + round(drift * 2)),
+            ("30m", 0.5, "high", 89 + round(drift * 2)),
+            ("1h", 1.0, "high", 87 + round(drift * 2)),
+            ("2h", 2.0, "high", 92 + round(drift * 2)),
+            ("4h", 4.0, "high", 95 + round(drift * 2)),
+            ("6h", 6.0, "high", 97 + round(drift * 2)),
         ]
     elif mode == "medium":
         points = [
             ("Now", 0.0, "medium", 47 + round(drift * 3)),
-            ("1h", 1.0, "medium", 52 + round(drift * 2)),
+            ("30m", 0.5, "medium", 51 + round(drift * 2)),
+            ("1h", 1.0, "medium", 55 + round(drift * 2)),
             ("2h", 2.0, "medium", 58 + round(drift * 2)),
-            ("6h", 6.0, "high", 68 + round(drift * 3)),
+            ("4h", 4.0, "medium", 63 + round(drift * 2)),
+            ("6h", 6.0, "high", 69 + round(drift * 3)),
         ]
     else:
         points = [
             ("Now", 0.0, "low", 14 + round(drift * 2)),
-            ("2h", 2.0, "low", 12 + round(drift * 2)),
-            ("6h", 6.0, "low", 10 + round(drift * 2)),
+            ("30m", 0.5, "low", 12 + round(drift * 2)),
+            ("1h", 1.0, "low", 15 + round(drift * 2)),
+            ("2h", 2.0, "low", 11 + round(drift * 2)),
+            ("4h", 4.0, "low", 10 + round(drift * 2)),
+            ("6h", 6.0, "low", 8 + round(drift * 2)),
         ]
 
     return [
