@@ -208,6 +208,14 @@ async def root():
     return {"message": "CareRelay API is running"}
 
 
+@app.get("/debug/env-check")
+async def env_check():
+    return {
+        "elevenlabsApiKeyPresent": bool(os.getenv("ELEVENLABS_API_KEY")),
+        "elevenlabsAgentIdPresent": bool(os.getenv("ELEVENLABS_AGENT_ID")),
+    }
+
+
 @app.get("/v1/specialists", response_model=List[SpecialistResponse])
 async def specialists():
     return [
