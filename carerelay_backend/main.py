@@ -908,6 +908,20 @@ def maybe_tts_audio(text: str) -> Optional[dict]:
         return None
 
 
+def required_tts_audio(text: str, *, patient_id: str, specialist: dict, session_id: str, phase: str) -> dict:
+    audio = maybe_tts_audio(text)
+    if not audio:
+        specialist_log(
+            "audio.required.missing",
+            patientId=patient_id,
+            specialistId=specialist["id"],
+            sessionId=session_id,
+            phase=phase,
+        )
+        raise RuntimeError(f"Unable to synthesize {phase} audio.")
+    return audio
+
+
 def pcm16_to_wav_bytes(pcm: bytes, sample_rate: int = 16_000) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
@@ -920,8 +934,17 @@ def pcm16_to_wav_bytes(pcm: bytes, sample_rate: int = 16_000) -> bytes:
 
 def specialist_reply_payload(session: dict, user_text: str) -> dict:
     reply = llm_specialist_reply(session["context"], user_text)
-    audio = maybe_tts_audio(reply)
-    return {"text": reply, "audio": audio["audio"] if audio else None, "format": audio["format"] if audio else None}
+    patient_id = session["patient_id"]
+    specialist = session["specialist"]
+    session_id = session["session_id"]
+    audio = required_tts_audio(
+        reply,
+        patient_id=patient_id,
+        specialist=specialist,
+        session_id=session_id,
+        phase="reply",
+    )
+    return {"text": reply, "audio": audio["audio"], "format": audio["format"]}
 
 
 @app.post("/v1/patients/{patient_id}/specialist-calls", response_model=SpecialistCallStartResponse)
@@ -984,16 +1007,15 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
         "specialistName": specialist["name"],
     })
     specialist_log("session.started.sent", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
-    await websocket.send_json({
-        "type": "agent.transcript",
-        "sessionId": session_id,
-        "speaker": specialist["name"],
-        "text": greeting,
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-    })
-    specialist_log("greeting.transcript.sent", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, textChars=len(greeting))
-    audio = maybe_tts_audio(greeting)
-    if audio:
+    specialist_log("greeting.text.ready", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, textChars=len(greeting))
+    try:
+        audio = required_tts_audio(
+            greeting,
+            patient_id=patient_id,
+            specialist=specialist,
+            session_id=session_id,
+            phase="greeting",
+        )
         await websocket.send_json({
             "type": "agent.audio",
             "sessionId": session_id,
@@ -1008,8 +1030,15 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
             format=audio["format"],
             base64Chars=len(audio["audio"]),
         )
-    else:
-        specialist_log("greeting.audio.missing", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
+    except Exception as exc:
+        specialist_log("greeting.audio.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
+        await websocket.send_json({
+            "type": "session.error",
+            "sessionId": session_id,
+            "message": "Audio is unavailable for this specialist call.",
+        })
+        await websocket.close()
+        return
 
     try:
         while True:
@@ -1085,55 +1114,45 @@ async def specialist_call_stream(websocket: WebSocket, session_id: str):
                 user_text = (payload.get("text") or "").strip()
                 if not user_text:
                     continue
-                await websocket.send_json({
-                    "type": "user.transcript.final",
-                    "sessionId": session_id,
-                    "speaker": "Patient",
-                    "text": user_text,
-                    "createdAt": datetime.now(timezone.utc).isoformat(),
-                })
+                specialist_log(
+                    "user.text.ready",
+                    patientId=patient_id,
+                    specialistId=specialist["id"],
+                    sessionId=session_id,
+                    textChars=len(user_text),
+                )
                 try:
                     reply_payload = specialist_reply_payload(session, user_text)
                 except Exception as exc:
-                    specialist_log("llm.request.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
+                    specialist_log("reply.pipeline.failed", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id, error=str(exc))
                     await websocket.send_json({
                         "type": "session.error",
                         "sessionId": session_id,
                         "message": "One moment.",
                     })
                     continue
-                await websocket.send_json({
-                    "type": "agent.transcript",
-                    "sessionId": session_id,
-                    "speaker": specialist["name"],
-                    "text": reply_payload["text"],
-                    "createdAt": datetime.now(timezone.utc).isoformat(),
-                })
                 specialist_log(
-                    "agent.transcript.sent",
+                    "agent.reply.text.ready",
                     patientId=patient_id,
                     specialistId=specialist["id"],
                     sessionId=session_id,
                     textChars=len(reply_payload["text"]),
                 )
                 audio = reply_payload["audio"]
-                if audio:
-                    await websocket.send_json({
-                        "type": "agent.audio",
-                        "sessionId": session_id,
-                        "format": reply_payload.get("format") or "mp3",
-                        "audioBase64": audio,
-                    })
-                    specialist_log(
-                        "agent.audio.sent",
-                        patientId=patient_id,
-                        specialistId=specialist["id"],
-                        sessionId=session_id,
-                        format=reply_payload.get("format") or "mp3",
-                        base64Chars=len(audio),
-                    )
-                else:
-                    specialist_log("agent.audio.missing", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
+                await websocket.send_json({
+                    "type": "agent.audio",
+                    "sessionId": session_id,
+                    "format": reply_payload.get("format") or "mp3",
+                    "audioBase64": audio,
+                })
+                specialist_log(
+                    "agent.audio.sent",
+                    patientId=patient_id,
+                    specialistId=specialist["id"],
+                    sessionId=session_id,
+                    format=reply_payload.get("format") or "mp3",
+                    base64Chars=len(audio),
+                )
     except WebSocketDisconnect:
         specialist_log("websocket.disconnected", patientId=patient_id, specialistId=specialist["id"], sessionId=session_id)
         return
